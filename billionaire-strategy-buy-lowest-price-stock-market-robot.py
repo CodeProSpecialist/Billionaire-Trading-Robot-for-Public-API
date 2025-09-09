@@ -21,6 +21,7 @@ from ratelimit import limits, sleep_and_retry
 import pandas_market_calendars as mcal
 
 # Load environment variables for Public API
+account_id = os.getenv('PUBLIC_ACCOUNT_ID_NUMBER')  # variable for account ID
 secret_key = os.getenv('PUBLIC_API_ACCESS_TOKEN')
 
 # Define APIError to match Alpaca's exception
