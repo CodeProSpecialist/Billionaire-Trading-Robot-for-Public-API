@@ -27,20 +27,12 @@ secret_key = os.getenv('PUBLIC_API_ACCESS_TOKEN')
 class APIError(Exception):
     pass
 
-def get_access_token():
-    url = "https://api.public.com/userapiauthservice/personal/access-tokens"
-    headers = {"Content-Type": "application/json"}
-    data = {"secret_key": secret_key}
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200:
-        return response.json()['access_token']
-    else:
-        raise APIError("Failed to get access token")
-
 class PublicAPI:
     def __init__(self, base_url='https://api.public.com'):
         self.base_url = base_url
-        self.access_token = get_access_token()
+        self.access_token = secret_key  # Use the access token directly from environment variable
+        if not self.access_token:
+            raise APIError("No access token found in PUBLIC_API_ACCESS_TOKEN environment variable")
         self.headers = {'Authorization': f'Bearer {self.access_token}', 'Content-Type': 'application/json'}
         self.account_id = self._get_account_id()
 
@@ -54,6 +46,7 @@ class PublicAPI:
             else:
                 raise APIError("No accounts found")
         else:
+            logging.error(f"Failed to get accounts: {response.text}")
             raise APIError(f"Failed to get accounts: {response.text}")
 
     def get_account(self):
