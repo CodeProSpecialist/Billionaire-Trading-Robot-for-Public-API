@@ -105,13 +105,10 @@ def robot_can_run():
     if market_open <= now <= market_close:
         return True, "Market open - trading allowed for all shares"
 
-    if FRACTIONAL_BUY_ORDERS:
-        return False, f"Fractional buys only during market hours ({market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')})"
+    if pre_market_open <= now <= post_market_close:
+        return True, "Extended hours - trading allowed for whole shares"
     else:
-        if pre_market_open <= now <= post_market_close:
-            return True, "Extended hours - trading allowed for whole shares"
-        else:
-            return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
+        return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
 # Simplified wrappers; replace with Public API or REST
 def client_get_account():
