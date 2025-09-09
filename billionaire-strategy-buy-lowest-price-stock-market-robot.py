@@ -340,11 +340,11 @@ def trading_robot(interval=120):
             current_time = datetime.now(eastern).strftime("%Y-%m-%d %I:%M:%S %p %Z")
             print(f"Current Time: {current_time}")
 
-            can_run, msg = robot_can_run()
-            print(msg)
-            if not can_run:
-                time.sleep(300)
-                continue
+            #can_run, msg = robot_can_run()
+            #print(msg)
+            #if not can_run:
+                #time.sleep(300)
+                #continue
 
             # Print account summary
             acc = client_get_account()
