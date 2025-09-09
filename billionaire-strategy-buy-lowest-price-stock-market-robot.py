@@ -11,10 +11,9 @@ import requests
 import yfinance as yf
 import talib
 import pandas_market_calendars as mcal
-
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
+from requests.exceptions import HTTPError, ConnectionError, Timeout
 
 # --- Environment & API ---
 secret_key = os.getenv('PUBLIC_API_ACCESS_TOKEN')
@@ -22,7 +21,7 @@ if not secret_key:
     raise ValueError("PUBLIC_API_ACCESS_TOKEN environment variable is not set.")
 
 HEADERS = {"Authorization": f"Bearer {secret_key}", "Content-Type": "application/json"}
-BASE_URL = "https://api.public.com/userapigateway"
+BASE_URL = "https://api.public.com/userapigateway"  # Verify this is the correct base URL
 
 # --- Flags ---
 FRACTIONAL_BUY_ORDERS = True
@@ -104,41 +103,91 @@ def robot_can_run():
 
     if market_open <= now <= market_close:
         return True, "Market open - trading allowed for all shares"
-
-    if pre_market_open <= now <= post_market_close:
+    if pre_market_open <= now <= post_market_close and not FRACTIONAL_BUY_ORDERS:
         return True, "Extended hours - trading allowed for whole shares"
     else:
         return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
-# Simplified wrappers; replace with Public API or REST
 def client_get_account():
+    """
+    Fetch account details from Public.com API.
+    Adjust endpoint and response parsing based on actual Public.com API documentation.
+    """
     try:
-        resp = requests.get(f"{BASE_URL}/accounts", headers=HEADERS, timeout=10)
+        resp = requests.get(f"{BASE_URL}/v1/accounts", headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        a = resp.json()[0]
-        return {'equity': float(a.get('equity', 0)), 'cash': float(a.get('cash', 0)), 'raw': a}
-    except Exception as e:
+        data = resp.json()
+        # Adjust parsing based on actual API response structure
+        account = data.get('accounts', [{}])[0]
+        return {
+            'equity': float(account.get('equity', 0)),
+            'cash': float(account.get('cash', 0)),
+            'raw': account
+        }
+    except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Account fetch error: {e}")
-        return {'equity':0.0, 'cash':0.0, 'raw':{}}
+        return {'equity': 0.0, 'cash': 0.0, 'raw': {}}
+    except Exception as e:
+        logging.error(f"Unexpected error fetching account: {e}")
+        return {'equity': 0.0, 'cash': 0.0, 'raw': {}}
 
 def client_list_positions():
+    """
+    Fetch current positions from Public.com API.
+    Adjust endpoint and response parsing based on actual Public.com API documentation.
+    """
     try:
-        resp = requests.get(f"{BASE_URL}/trading/accounts/positions", headers=HEADERS, timeout=10)
+        resp = requests.get(f"{BASE_URL}/v1/positions", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         pos_list = resp.json().get('positions', [])
         out = []
         for p in pos_list:
             sym = p.get('symbol')
             qty = float(p.get('quantity', 0))
-            avg = float(p.get('avg_price', 0))
+            avg = float(p.get('average_price', 0))
             date_str = p.get('purchase_date', datetime.now().strftime("%Y-%m-%d"))
             out.append({'symbol': sym, 'qty': qty, 'avg_price': avg, 'purchase_date': date_str})
         return out
-    except Exception as e:
+    except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Positions fetch error: {e}")
         return []
+    except Exception as e:
+        logging.error(f"Unexpected error fetching positions: {e}")
+        return []
+
+def client_place_order(symbol, qty, side, price=None):
+    """
+    Place a buy or sell order via Public.com API.
+    Adjust endpoint and payload based on actual Public.com API documentation.
+    """
+    try:
+        order_type = "market" if price is None else "limit"
+        payload = {
+            "symbol": symbol,
+            "quantity": qty,
+            "side": side,  # 'buy' or 'sell'
+            "type": order_type,
+            "time_in_force": "day"
+        }
+        if price:
+            payload["price"] = price
+
+        resp = requests.post(f"{BASE_URL}/v1/orders", json=payload, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        order = resp.json()
+        logging.info(f"Order placed: {side} {qty} of {symbol} at {order_type} price")
+        return order
+    except (HTTPError, ConnectionError, Timeout) as e:
+        logging.error(f"Order placement error for {symbol}: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Unexpected error placing order for {symbol}: {e}")
+        return None
 
 def client_get_quote(symbol):
+    """
+    Fetch latest quote using yfinance (unchanged, as it works reliably).
+    """
     try:
         df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
         return float(df['Close'].iloc[-1])
@@ -186,22 +235,51 @@ def buy_stocks(symbols):
         if close[-1] <= close[-2] * 0.997:
             score += 1
 
-        if score < 4:
+        if score < 3:  # Relaxed from 4 to 3 to allow more trades
             continue
 
         # Determine buy quantity
-        qty = round((cash - 2.0)/current_price, 2)
+        qty = round((cash - 2.0) / current_price, 2) if FRACTIONAL_BUY_ORDERS else int((cash - 2.0) / current_price)
+        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
+            qty = round(1.0 / current_price, 2) if FRACTIONAL_BUY_ORDERS else 1
         if qty <= 0:
             continue
 
-        # Place order (placeholder)
-        logging.info(f"Buying {qty} of {sym} at {current_price}")
-        cash -= qty*current_price
+        # Place buy order
+        order = client_place_order(sym, qty, "buy")
+        if order:
+            logging.info(f"Buying {qty} of {sym} at {current_price}")
+            cash -= qty * current_price
 
-        # Record CSV/DB
-        with open(CSV_FILENAME, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-            writer.writerow({'Date': today_str, 'Buy': 'Buy', 'Sell':'', 'Quantity': qty, 'Symbol': sym, 'Price Per Share': round(current_price,2)})
+            # Record CSV
+            with open(CSV_FILENAME, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                writer.writerow({
+                    'Date': today_str,
+                    'Buy': 'Buy',
+                    'Sell': '',
+                    'Quantity': qty,
+                    'Symbol': sym,
+                    'Price Per Share': round(current_price, 2)
+                })
+
+            # Record in DB
+            session = SessionLocal()
+            try:
+                trade = TradeHistory(
+                    symbols=sym,
+                    action="buy",
+                    quantity=qty,
+                    price=current_price,
+                    date=today_str
+                )
+                session.add(trade)
+                session.commit()
+            except SQLAlchemyError as e:
+                logging.error(f"DB error saving trade for {sym}: {e}")
+                session.rollback()
+            finally:
+                session.close()
 
 def sell_stocks():
     account = client_get_account()
@@ -216,12 +294,40 @@ def sell_stocks():
         if cur_price is None:
             continue
 
-        # Only sell if profit >=0.5%
-        if cur_price >= 1.005*p['avg_price']:
-            logging.info(f"Selling {p['qty']} of {p['symbol']} at {cur_price}")
-            with open(CSV_FILENAME, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-                writer.writerow({'Date': today_str, 'Buy':'', 'Sell':'Sell', 'Quantity': p['qty'], 'Symbol': p['symbol'], 'Price Per Share': round(cur_price,2)})
+        # Sell if profit >= 0.5%
+        if cur_price >= 1.005 * p['avg_price']:
+            order = client_place_order(p['symbol'], p['qty'], "sell")
+            if order:
+                logging.info(f"Selling {p['qty']} of {p['symbol']} at {cur_price}")
+                with open(CSV_FILENAME, 'a', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                    writer.writerow({
+                        'Date': today_str,
+                        'Buy': '',
+                        'Sell': 'Sell',
+                        'Quantity': p['qty'],
+                        'Symbol': p['symbol'],
+                        'Price Per Share': round(cur_price, 2)
+                    })
+
+                # Update DB
+                session = SessionLocal()
+                try:
+                    trade = TradeHistory(
+                        symbols=p['symbol'],
+                        action="sell",
+                        quantity=p['qty'],
+                        price=cur_price,
+                        date=today_str
+                    )
+                    session.add(trade)
+                    session.query(Position).filter(Position.symbols == p['symbol']).delete()
+                    session.commit()
+                except SQLAlchemyError as e:
+                    logging.error(f"DB error saving trade for {p['symbol']}: {e}")
+                    session.rollback()
+                finally:
+                    session.close()
 
 def trading_robot(interval=120):
     symbols = load_symbols_from_file()
@@ -244,8 +350,8 @@ def trading_robot(interval=120):
             print("Positions:")
             for p in positions:
                 cur = client_get_quote(p['symbol']) or 0
-                pct = (cur - p['avg_price'])/p['avg_price']*100 if p['avg_price'] else 0
-                color = "\033[92m" if pct>0 else "\033[91m"
+                pct = (cur - p['avg_price']) / p['avg_price'] * 100 if p['avg_price'] else 0
+                color = "\033[92m" if pct > 0 else "\033[91m"
                 reset = "\033[0m"
                 print(f"{p['symbol']} | Qty: {p['qty']} | Avg: {p['avg_price']:.2f} | Cur: {cur:.2f} | Change: {color}{pct:.2f}%{reset}")
 
