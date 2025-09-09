@@ -37,17 +37,24 @@ class PublicAPI:
         self.account_id = account_id or self._get_account_id()
 
     def _get_account_id(self):
-        url = f"{self.base_url}/userapigateway/account/v1/accounts"
-        response = requests.get(url, headers=self.headers)
-        if response.status_code == 200:
+        url = f"{self.base_url}/accounts"  # Updated endpoint
+        logging.info(f"Sending request to {url} with headers {self.headers}")
+        try:
+            response = requests.get(url, headers=self.headers)
+            response.raise_for_status()  # Raises an HTTPError for bad responses
             accounts = response.json().get('accounts', [])
             if accounts:
-                return accounts[0]['accountId']
+                account_id = accounts[0].get('accountId') or accounts[0].get('id')
+                logging.info(f"Retrieved account ID: {account_id}")
+                return account_id
             else:
-                raise APIError("No accounts found")
-        else:
-            logging.error(f"Failed to get accounts: {response.text}")
+                raise APIError("No accounts found in response")
+        except requests.exceptions.HTTPError as e:
+            logging.error(f"HTTP error fetching accounts: {e}, Response: {response.text}")
             raise APIError(f"Failed to get accounts: {response.text}")
+        except Exception as e:
+            logging.error(f"Unexpected error fetching accounts: {e}")
+            raise APIError(f"Unexpected error: {str(e)}")
 
     def get_account(self):
         url = f"{self.base_url}/userapigateway/account/v1/accounts/{self.account_id}"
