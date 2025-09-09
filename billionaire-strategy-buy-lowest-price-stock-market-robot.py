@@ -656,5 +656,3 @@ def trading_robot(symbols=["AAPL"], interval=60):
             logging.error(f"Unexpected error: {e}")
             time.sleep(interval)
 
-if __name__ == "__main__":
-    trading_robot()
