@@ -87,9 +87,10 @@ nyse_cal = mcal.get_calendar('NYSE')
 
 def robot_can_run():
     """
-    Checks if robot can run now:
-    - Fractional shares only during regular hours
-    - Whole shares allowed in pre/post market
+    Determines if the trading robot can run now:
+    - Fractional buys only during regular market hours
+    - Whole shares allowed in pre-market or post-market
+    Returns: (can_run: bool, message: str)
     """
     now = datetime.now(eastern)
     schedule = nyse_cal.schedule(start_date=now.date(), end_date=now.date())
@@ -98,19 +99,19 @@ def robot_can_run():
 
     market_open = schedule.iloc[0]['market_open'].tz_convert(eastern)
     market_close = schedule.iloc[0]['market_close'].tz_convert(eastern)
-    pre_market_open = market_open - timedelta(hours=2)
-    post_market_close = market_close + timedelta(hours=4)
+    pre_market_open = market_open - timedelta(hours=2)  # 7:00 AM ET approx
+    post_market_close = market_close + timedelta(hours=4) # 8:00 PM ET approx
+
+    if market_open <= now <= market_close:
+        return True, "Market open - trading allowed for all shares"
 
     if FRACTIONAL_BUY_ORDERS:
-        if market_open <= now <= market_close:
-            return True, "Fractional buys allowed (market open)"
-        else:
-            return False, f"Fractional buys only during regular hours: {market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')}"
+        return False, f"Fractional buys only during market hours ({market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')})"
     else:
         if pre_market_open <= now <= post_market_close:
-            return True, "Whole shares allowed (extended hours)"
+            return True, "Extended hours - trading allowed for whole shares"
         else:
-            return False, f"Trading outside extended hours: {pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')}"
+            return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
 # Simplified wrappers; replace with Public API or REST
 def client_get_account():
