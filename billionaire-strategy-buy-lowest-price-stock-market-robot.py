@@ -1,4 +1,3 @@
-```python
 import threading
 import logging
 import csv
