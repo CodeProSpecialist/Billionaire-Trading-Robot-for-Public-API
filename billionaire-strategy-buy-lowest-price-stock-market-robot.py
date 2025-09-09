@@ -98,8 +98,8 @@ def robot_can_run():
 
     market_open = schedule.iloc[0]['market_open'].tz_convert(eastern)
     market_close = schedule.iloc[0]['market_close'].tz_convert(eastern)
-    pre_market_open = market_open - timedelta(hours=2)  # 7:00 AM ET approx
-    post_market_close = market_close + timedelta(hours=4) # 8:00 PM ET approx
+    pre_market_open = market_open - timedelta(hours=2)  # 7:00 AM ET
+    post_market_close = market_close + timedelta(hours=4) # 8:00 PM ET
 
     if market_open <= now <= market_close:
         return True, "Market open - trading allowed for all shares"
@@ -117,7 +117,6 @@ def client_get_account():
         resp = requests.get(f"{BASE_URL}/v1/accounts", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        # Adjust parsing based on actual API response structure
         account = data.get('accounts', [{}])[0]
         return {
             'equity': float(account.get('equity', 0)),
@@ -145,7 +144,7 @@ def client_list_positions():
             sym = p.get('symbol')
             qty = float(p.get('quantity', 0))
             avg = float(p.get('average_price', 0))
-            date_str = p.get('purchase_date', datetime.now().strftime("%Y-%m-%d"))
+            date_str = p.get('purchase_date', datetime.now(eastern).strftime("%Y-%m-%d"))
             out.append({'symbol': sym, 'qty': qty, 'avg_price': avg, 'purchase_date': date_str})
         return out
     except (HTTPError, ConnectionError, Timeout) as e:
@@ -186,7 +185,7 @@ def client_place_order(symbol, qty, side, price=None):
 
 def client_get_quote(symbol):
     """
-    Fetch latest quote using yfinance (unchanged, as it works reliably).
+    Fetch latest quote using yfinance.
     """
     try:
         df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
@@ -235,7 +234,7 @@ def buy_stocks(symbols):
         if close[-1] <= close[-2] * 0.997:
             score += 1
 
-        if score < 3:  # Relaxed from 4 to 3 to allow more trades
+        if score < 3:
             continue
 
         # Determine buy quantity
@@ -337,6 +336,10 @@ def trading_robot(interval=120):
 
     while True:
         try:
+            # Print current date and time in Eastern Time
+            current_time = datetime.now(eastern).strftime("%Y-%m-%d %I:%M:%S %p %Z")
+            print(f"Current Time: {current_time}")
+
             can_run, msg = robot_can_run()
             print(msg)
             if not can_run:
