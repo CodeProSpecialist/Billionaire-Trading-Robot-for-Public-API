@@ -32,16 +32,13 @@ logging.basicConfig(
     handlers=[handler]
 )
 
-# Load environment variables
-account_id = os.getenv('PUBLIC_ACCOUNT_ID_NUMBER')
+# Load environment variable
 secret_key = os.getenv('PUBLIC_API_ACCESS_TOKEN')
-username = os.getenv('PUBLIC_USERNAME')
-password = os.getenv('PUBLIC_PASSWORD')
 
-# Validate environment variables (prioritize token-based authentication)
-if not (account_id and secret_key) and not (username and password):
-    logging.error("Missing required environment variables for authentication")
-    raise ValueError("Must provide either PUBLIC_ACCOUNT_ID_NUMBER and PUBLIC_API_ACCESS_TOKEN or PUBLIC_USERNAME and PUBLIC_PASSWORD")
+# Validate environment variable
+if not secret_key:
+    logging.error("Missing required environment variable: PUBLIC_API_ACCESS_TOKEN")
+    raise ValueError("Missing required environment variable: PUBLIC_API_ACCESS_TOKEN")
 
 # Define APIError
 class APIError(Exception):
@@ -50,66 +47,60 @@ class APIError(Exception):
 # Endpoints class for Public.com API
 class Endpoints:
     def __init__(self):
-        self.baseurl = "https://public.com"
-        self.prodapi = "https://prod-api.154310543964.hellopublic.com"
-        self.ordergateway = f"{self.prodapi}/customerordergateway"
-        self.userservice = f"{self.baseurl}/userservice"
+        self.baseurl = "https://api.public.com"
+        self.ordergateway = f"{self.baseurl}/userapigateway/trading"
 
-    def login_url(self) -> str:
-        return f"{self.userservice}/public/web/login"
+    def access_token_url(self) -> str:
+        return f"{self.baseurl}/userapiauthservice/personal/access-tokens"
 
-    def mfa_url(self) -> str:
-        return f"{self.userservice}/public/web/verify-two-factor"
-
-    def refresh_url(self) -> str:
-        return f"{self.userservice}/public/web/token-refresh"
+    def account_url(self) -> str:
+        return f"{self.baseurl}/userapigateway/trading/account"
 
     def portfolio_url(self, account_uuid: str) -> str:
-        return f"{self.prodapi}/hstier1service/account/{account_uuid}/portfolio"
+        return f"{self.baseurl}/userapigateway/trading/{account_uuid}/portfolio/v2"
 
     def account_history_url(self, account_uuid: str) -> str:
-        return f"{self.prodapi}/hstier2service/history?accountUuids={account_uuid}"
+        return f"{self.baseurl}/hstier2service/history?accountUuids={account_uuid}"
 
     def get_quote_url(self, symbol: str) -> str:
-        return f"{self.prodapi}/tradingservice/quote/equity/{symbol}"
+        return f"{self.baseurl}/tradingservice/quote/equity/{symbol}"
 
     def get_bars_url(self, symbol: str) -> str:
-        return f"{self.prodapi}/tradingservice/bars/equity/{symbol}"
+        return f"{self.baseurl}/tradingservice/bars/equity/{symbol}"
 
     def preflight_order_url(self, account_uuid: str) -> str:
-        return f"{self.ordergateway}/accounts/{account_uuid}/orders/preflight"
+        return f"{self.ordergateway}/{account_uuid}/orders/preflight"
 
     def build_order_url(self, account_uuid: str) -> str:
-        return f"{self.ordergateway}/accounts/{account_uuid}/orders"
+        return f"{self.ordergateway}/{account_uuid}/orders"
 
     def submit_put_order_url(self, account_uuid: str, order_id: str) -> str:
-        return f"{self.ordergateway}/accounts/{account_uuid}/orders/{order_id}"
+        return f"{self.ordergateway}/{account_uuid}/orders/{order_id}"
 
     def submit_get_order_url(self, account_uuid: str, order_id: str) -> str:
-        return f"{self.prodapi}/hstier1service/account/{account_uuid}/order/{order_id}"
+        return f"{self.baseurl}/hstier1service/account/{account_uuid}/order/{order_id}"
 
     def get_pending_orders_url(self, account_uuid: str) -> str:
-        return f"{self.prodapi}/hstier2service/history?status=PENDING&type=ALL&accountUuids={account_uuid}"
+        return f"{self.baseurl}/hstier2service/history?status=PENDING&type=ALL&accountUuids={account_uuid}"
 
     def cancel_pending_order_url(self, account_uuid: str, order_id: str) -> str:
-        return f"{self.ordergateway}/accounts/{account_uuid}/orders/{order_id}"
+        return f"{self.ordergateway}/{account_uuid}/orders/{order_id}"
 
     def contract_details_url(self, option_symbol: str) -> str:
-        return f"{self.prodapi}/hstier1service/contract-details/{option_symbol}/BUY"
+        return f"{self.baseurl}/hstier1service/contract-details/{option_symbol}/BUY"
 
-    def build_headers(self, auth: bool = None, prodApi: bool = False) -> dict:
+    def build_headers(self, auth: bool = None) -> dict:
         headers = {
-            "authority": "public.com",
+            "Content-Type": "application/json",
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.8",
-            "content-type": "application/json",
             "origin": "https://public.com",
             "sec-ch-ua": '"Not A(Brand";v="8", "Chromium";v="132", "Brave";v="132"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
+            "sec-fetch-site": "same-site",
             "sec-gpc": "1",
             "user-agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -119,23 +110,8 @@ class Endpoints:
             "x-app-version": "web-1.0.11",
         }
         if auth is not None:
-            headers["authorization"] = auth
-        if prodApi:
-            headers["authority"] = self.prodapi.replace("https://", "")
-            headers["sec-fetch-site"] = "cross-site"
+            headers["Authorization"] = f"Bearer {auth}"
         return headers
-
-    @staticmethod
-    def build_payload(email: str, password: str, code: str = None) -> str:
-        payload = {
-            "email": email,
-            "password": password,
-        }
-        if code is None:
-            payload["stayLoggedIn"] = True
-        else:
-            payload["verificationCode"] = code
-        return json.dumps(payload)
 
 # Public.com API client class
 class Public:
@@ -143,21 +119,14 @@ class Public:
         self.session = requests.Session()
         self.endpoints = Endpoints()
         self.session.headers.update(self.endpoints.build_headers())
-        self.access_token = secret_key or None
-        self.account_uuid = account_id or None
+        self.access_token = None
+        self.account_uuid = None
         self.account_number = None
-        self.all_login_info = None
         self.timeout = 10
-        self.expires_at = None
         self.filename = filename
         self.path = path
-        if not self.access_token or not self.account_uuid:
-            if not username or not password:
-                raise APIError("Must provide PUBLIC_USERNAME and PUBLIC_PASSWORD if PUBLIC_API_ACCESS_TOKEN or PUBLIC_ACCOUNT_ID_NUMBER is missing")
-            self.login(username, password, wait_for_2fa=True)
-        else:
-            self.session.headers.update(self.endpoints.build_headers(self.access_token))
         self._load_cookies()
+        self.authenticate()
 
     def _save_cookies(self) -> None:
         filename = self.filename
@@ -186,96 +155,55 @@ class Public:
             os.remove(filename)
         self.session.cookies.clear()
 
-    def login(self, username: str = None, password: str = None, wait_for_2fa: bool = True, code: str = None) -> dict:
-        if username is None or password is None:
-            raise APIError("Username or password not provided")
-        refresh_success = False
+    def authenticate(self) -> None:
+        logging.info("Authenticating with Public.com API...")
+        # Step 1: Obtain access token
+        url = self.endpoints.access_token_url()
+        headers = self.endpoints.build_headers()
+        request_body = {
+            "validityInMinutes": 123,
+            "secret": secret_key
+        }
         try:
-            response = self._refresh_token()
-            refresh_success = True
-        except Exception:
-            pass
-        headers = self.session.headers
-        need_2fa = True
-        if not refresh_success:
-            payload = self.endpoints.build_payload(username, password)
-            self._load_cookies()
-            response = self.session.post(
-                self.endpoints.login_url(),
-                headers=headers,
-                data=payload,
-                timeout=self.timeout,
-            )
+            response = self.session.post(url, headers=headers, json=request_body, timeout=self.timeout)
             if response.status_code != 200:
-                self._clear_cookies()
-                response = self.session.post(
-                    self.endpoints.login_url(),
-                    headers=headers,
-                    data=payload,
-                    timeout=self.timeout,
-                )
-            if response.status_code != 200:
-                logging.error(f"Login failed: {response.text}")
-                raise APIError(f"Login failed: {response.text}")
-            response = response.json()
-            if response.get("twoFactorResponse") is not None:
-                self._clear_cookies()
-                phone = response["twoFactorResponse"]["maskedPhoneNumber"]
-                logging.info(f"2FA required, code sent to phone number {phone}")
-                code = input("Enter 2FA code: ")
-            else:
-                need_2fa = False
-        if need_2fa and not refresh_success:
-            payload = self.endpoints.build_payload(username, password, code)
-            response = self.session.post(
-                self.endpoints.mfa_url(),
-                headers=headers,
-                data=payload,
-                timeout=self.timeout,
-            )
-            if response.status_code != 200:
-                logging.error(f"MFA login failed: {response.text}")
-                raise APIError(f"MFA login failed: {response.text}")
-            response = self.session.post(
-                self.endpoints.login_url(),
-                headers=headers,
-                data=payload,
-                timeout=self.timeout,
-            )
-            if response.status_code != 200:
-                logging.error(f"Login failed after MFA: {response.text}")
-                raise APIError(f"Login after MFA failed: {response.text}")
-            response = response.json()
-        if "loginResponse" in response:
-            response = response["loginResponse"]
-        self.access_token = response["accessToken"]
-        self.account_uuid = response["accounts"][0]["accountUuid"]
-        self.account_number = response["accounts"][0]["account"]
-        self.expires_at = (int(response["serverTime"]) / 1000) + int(response["expiresIn"])
-        self.all_login_info = response
-        self.session.headers.update(self.endpoints.build_headers(self.access_token))
-        self._save_cookies()
-        return response
+                logging.error(f"Access token request failed: {response.status_code} {response.text}")
+                raise APIError(f"Access token request failed: {response.text}")
+            data = response.json()
+            self.access_token = data.get("accessToken")
+            if not self.access_token:
+                logging.error(f"No access token in response: {data}")
+                raise APIError("No access token received")
+            logging.info("Access token obtained successfully")
+            self.session.headers.update(self.endpoints.build_headers(self.access_token))
+        except Exception as e:
+            logging.error(f"Authentication failed at access token step: {str(e)}")
+            raise APIError(f"Authentication failed: {str(e)}")
 
-    def _refresh_token(self) -> dict:
-        headers = self.session.headers
-        response = self.session.post(
-            self.endpoints.refresh_url(), headers=headers, timeout=self.timeout
-        )
-        if response.status_code != 200:
-            logging.error(f"Token refresh failed: {response.text}")
-            raise APIError(f"Token refresh failed: {response.text}")
-        response = response.json()
-        self.access_token = response["accessToken"]
-        self.expires_at = (int(response["serverTime"]) / 1000) + int(response["expiresIn"])
-        self.account_uuid = response["accounts"][0]["accountUuid"]
-        self.session.headers.update(self.endpoints.build_headers(self.access_token))
+        # Step 2: Retrieve account ID
+        url = self.endpoints.account_url()
+        headers = self.endpoints.build_headers(self.access_token)
+        try:
+            response = self.session.get(url, headers=headers, timeout=self.timeout)
+            if response.status_code != 200:
+                logging.error(f"Account ID request failed: {response.status_code} {response.text}")
+                raise APIError(f"Account ID request failed: {response.text}")
+            data = response.json()
+            self.account_uuid = data.get("accounts", [{}])[0].get("accountId")
+            self.account_number = data.get("accounts", [{}])[0].get("account")
+            if not self.account_uuid:
+                logging.error(f"No account ID in response: {data}")
+                raise APIError("No account ID received")
+            logging.info(f"Account ID retrieved: {self.account_uuid}")
+        except Exception as e:
+            logging.error(f"Authentication failed at account ID step: {str(e)}")
+            raise APIError(f"Authentication failed: {str(e)}")
+
         self._save_cookies()
-        return response
 
     @on_exception(expo, APIError, max_tries=3)
     def get_account(self):
-        headers = self.endpoints.build_headers(self.access_token, prodApi=True)
+        headers = self.endpoints.build_headers(self.access_token)
         portfolio = self.session.get(
             self.endpoints.portfolio_url(self.account_uuid),
             headers=headers,
@@ -303,7 +231,7 @@ class Public:
 
     @on_exception(expo, APIError, max_tries=3)
     def submit_order(self, symbol, qty=None, notional=None, side=None, type=None, time_in_force=None, trail_percent=None):
-        headers = self.endpoints.build_headers(self.access_token, prodApi=True)
+        headers = self.endpoints.build_headers(self.access_token)
         symbol = symbol.upper()
         side = side.upper()
         type = type.upper()
