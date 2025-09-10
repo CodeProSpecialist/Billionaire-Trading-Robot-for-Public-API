@@ -19,7 +19,7 @@ request_body = {
 response = requests.post(url, headers=headers, json=request_body)
 access = response.json()["accessToken"]
 
-# Account Id
+# Account Information
 url = "https://api.public.com/userapigateway/trading/account"
 headers = {
     "Authorization": f"Bearer {access}",
@@ -27,16 +27,18 @@ headers = {
 }
 
 response = requests.get(url, headers=headers)
-accountId = response.json()["accounts"][0]["accountId"]
+data = response.json()
+print(data)
 
-# Portfolio
-url = f"https://api.public.com/userapigateway/trading/{accountId}/portfolio/v2"
+accountId = data["accounts"][0]["accountId"]
+
+# Owned Stocks
+url = "https://api.public.com/userapigateway/trading/{accountId}/portfolio/v2"
 headers = {
     "Authorization": f"Bearer {access}",
     "Content-Type": "application/json"
 }
 
-response = requests.get(url, headers=headers)
+response = requests.get(url.format(accountId=accountId), headers=headers)
 data = response.json()
-data.pop("accountId", None)
-print(data)
+#print(data)
