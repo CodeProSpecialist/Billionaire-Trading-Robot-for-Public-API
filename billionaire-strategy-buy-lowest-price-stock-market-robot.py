@@ -15,10 +15,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 
-# --- Environment & API ---
-secret_key = os.getenv('PUBLIC_API_ACCESS_TOKEN')
-if not secret_key:
-    raise ValueError("PUBLIC_API_ACCESS_TOKEN environment variable is not set.")
+# Core API code (must match exactly)
+secret = os.getenv("YOUR_SECRET_KEY")
 
 HEADERS = {"Authorization": f"Bearer {secret_key}", "Content-Type": "application/json"}
 BASE_URL = "https://api.public.com/userapigateway"
