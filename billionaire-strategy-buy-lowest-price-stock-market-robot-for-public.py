@@ -13,13 +13,17 @@ import talib
 import pandas_market_calendars as mcal
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 
-# Core API code (must match exactly)
-secret = os.getenv("YOUR_SECRET_KEY")
-
-HEADERS = {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
+# Global variables
+# Note: Ensure YOUR_SECRET_KEY is exported in your .bashrc file, e.g.,
+# export YOUR_SECRET_KEY="your-api-key-here"
+YOUR_SECRET_KEY = "YOUR_SECRET_KEY"
+secret = None
+access_token = None
 BASE_URL = "https://api.public.com/userapigateway"
+HEADERS = None  # Will be set after fetching access token
 
 # --- Flags ---
 FRACTIONAL_BUY_ORDERS = True
@@ -106,16 +110,55 @@ def robot_can_run():
     else:
         return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
+def fetch_access_token():
+    """Fetch a new access token using the core Public.com API code."""
+    global secret, access_token, HEADERS
+    try:
+        # Core API code (must match exactly)
+        secret = os.getenv("YOUR_SECRET_KEY")
+
+        # Authorization
+        url = "https://api.public.com/userapiauthservice/personal/access-tokens"
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        request_body = {
+            "validityInMinutes": 1440,
+            "secret": secret
+        }
+
+        response = requests.post(url, headers=headers, json=request_body)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        access_token = response.json()["accessToken"]
+
+        # Update HEADERS with new access token
+        HEADERS = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        logging.info("Successfully fetched new access token")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to fetch access token: {str(e)}")
+        logging.info("Retrying token fetch in 2 minutes...")
+        time.sleep(120)  # Wait 2 minutes before retrying
+        return False
+
 def client_get_account():
     """
     Fetch account details from Public.com API.
-    Adjust endpoint and response parsing based on actual Public.com API documentation.
     """
     try:
         resp = requests.get(f"{BASE_URL}/v1/accounts", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         account = data.get('accounts', [{}])[0]
+        print(data)  # Core API code requirement
+        print(f"Current date and time: {datetime.now()}")
+        print()  # Empty print statement for spacing
+        next_run = datetime.now(eastern) + timedelta(seconds=120)
+        print(f"Next run time: {next_run.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
@@ -145,6 +188,8 @@ def client_list_positions():
         resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+        #print(data)  # Core API code requirement (commented out)
+        logging.info(f"Portfolio data: {data}")  # Log for consistency
         pos_list = data.get('positions', [])
         out = []
         for p in pos_list:
@@ -170,7 +215,6 @@ def client_list_positions():
 def client_place_order(symbol, qty, side, price=None):
     """
     Place a buy or sell order via Public.com API.
-    Adjust endpoint and payload based on actual Public.com API documentation.
     """
     try:
         order_type = "market" if price is None else "limit"
@@ -342,6 +386,7 @@ def sell_stocks():
                     session.close()
 
 def trading_robot(interval=120):
+    global secret, access_token, HEADERS
     symbols = load_symbols_from_file()
     if not symbols:
         print("No symbols loaded.")
@@ -349,6 +394,12 @@ def trading_robot(interval=120):
 
     while True:
         try:
+            # Fetch new access token at start or after restart
+            if not fetch_access_token():
+                logging.error("Failed to fetch access token, retrying in main loop")
+                time.sleep(120)
+                continue
+
             # Print current date and time in Eastern Time
             current_time = datetime.now(eastern)
             print(f"Current Time: {current_time.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
