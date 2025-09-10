@@ -2,8 +2,6 @@ import os
 import requests
 import uuid
 
-load_dotenv()
-
 # below is correct API secret key reading code
 # secret = os.getenv("YOUR_SECRET_KEY")
 
