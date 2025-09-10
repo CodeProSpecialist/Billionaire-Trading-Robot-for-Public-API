@@ -22,6 +22,8 @@ from requests.exceptions import HTTPError, ConnectionError, Timeout
 YOUR_SECRET_KEY = "YOUR_SECRET_KEY"
 secret = None
 access_token = None
+account_id = None
+last_token_fetch_time = None
 BASE_URL = "https://api.public.com/userapigateway"
 HEADERS = None  # Will be set after fetching access token
 
@@ -110,9 +112,9 @@ def robot_can_run():
     else:
         return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
-def fetch_access_token():
-    """Fetch a new access token using the core Public.com API code."""
-    global secret, access_token, HEADERS
+def fetch_access_token_and_account_id():
+    """Fetch a new access token and account ID using the core Public.com API code."""
+    global secret, access_token, account_id, HEADERS, last_token_fetch_time
     try:
         # Core API code (must match exactly)
         secret = os.getenv("YOUR_SECRET_KEY")
@@ -132,15 +134,41 @@ def fetch_access_token():
         response.raise_for_status()  # Raise an exception for bad status codes
         access_token = response.json()["accessToken"]
 
+        # Account Information
+        url = "https://api.public.com/userapigateway/trading/account"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        data = response.json()
+        print(data)
+        account_id = data["accounts"][0]["accountId"]
+
+        # Owned Stocks
+        url = "https://api.public.com/userapigateway/trading/{accountId}/portfolio/v2"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.get(url.format(accountId=account_id), headers=headers)
+        response.raise_for_status()  # Raise an exception for bad status codes
+        data = response.json()
+        #print(data)
+
         # Update HEADERS with new access token
         HEADERS = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-        logging.info("Successfully fetched new access token")
+        last_token_fetch_time = datetime.now()
+        logging.info("Successfully fetched new access token and account ID")
         return True
     except Exception as e:
-        logging.error(f"Failed to fetch access token: {str(e)}")
+        logging.error(f"Failed to fetch access token or account ID: {str(e)}")
         logging.info("Retrying token fetch in 2 minutes...")
         time.sleep(120)  # Wait 2 minutes before retrying
         return False
@@ -162,26 +190,23 @@ def client_get_account():
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
-            'accountId': account.get('accountId', ''),  # Extract accountId
+            'accountId': account.get('accountId', account_id),  # Use global account_id if needed
             'raw': account
         }
     except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Account fetch error: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'accountId': '', 'raw': {}}
+        return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
     except Exception as e:
         logging.error(f"Unexpected error fetching account: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'accountId': '', 'raw': {}}
+        return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
 
 def client_list_positions():
     """
     Fetch current positions from Public.com API using portfolio/v2 endpoint.
     """
     try:
-        # Get accountId from client_get_account
-        account = client_get_account()
-        account_id = account.get('accountId')
         if not account_id:
-            logging.error("No accountId found in account data")
+            logging.error("No accountId available")
             return []
 
         # Fetch positions from portfolio/v2 endpoint
@@ -386,7 +411,7 @@ def sell_stocks():
                     session.close()
 
 def trading_robot(interval=120):
-    global secret, access_token, HEADERS
+    global secret, access_token, account_id, HEADERS, last_token_fetch_time
     symbols = load_symbols_from_file()
     if not symbols:
         print("No symbols loaded.")
@@ -394,11 +419,15 @@ def trading_robot(interval=120):
 
     while True:
         try:
-            # Fetch new access token at start or after restart
-            if not fetch_access_token():
-                logging.error("Failed to fetch access token, retrying in main loop")
-                time.sleep(120)
-                continue
+            # Fetch new access token and account ID if none exist or 24 hours have elapsed
+            current_time = datetime.now()
+            if (access_token is None or 
+                last_token_fetch_time is None or 
+                (current_time - last_token_fetch_time).total_seconds() >= 86400):
+                if not fetch_access_token_and_account_id():
+                    logging.error("Failed to fetch access token or account ID, retrying in main loop")
+                    time.sleep(120)
+                    continue
 
             # Print current date and time in Eastern Time
             current_time = datetime.now(eastern)
