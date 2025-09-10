@@ -3,12 +3,7 @@ import requests
 import uuid
 
 # below is correct API secret key reading code
-# secret = os.YOUR_SECRET_KEY
-
-# Permanent secret
-secret = os.YOUR_SECRET_KEY
-if not YOUR_SECRET_KEY:
-    raise ValueError("Please set YOUR_SECRET_KEY in your environment.")
+secret = os.getenv("YOUR_SECRET_KEY")
 
 # Authorization
 url = "https://api.public.com/userapiauthservice/personal/access-tokens"
