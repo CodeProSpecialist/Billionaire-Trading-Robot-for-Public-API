@@ -113,7 +113,7 @@ def robot_can_run():
         return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
 def fetch_access_token_and_account_id():
-    """Fetch a new access token and account ID using the core Public.com API code."""
+    """Fetch a new access token and BROKERAGE account ID using the core Public.com API code."""
     global secret, access_token, account_id, HEADERS, last_token_fetch_time
     try:
         # Core API code (must match exactly)
@@ -145,7 +145,12 @@ def fetch_access_token_and_account_id():
         response.raise_for_status()  # Raise an exception for bad status codes
         data = response.json()
         print(data)
-        account_id = data["accounts"][0]["accountId"]
+
+        # Filter for BROKERAGE account
+        brokerage_account = next((acc for acc in data["accounts"] if acc.get("accountType") == "BROKERAGE"), None)
+        if not brokerage_account:
+            raise ValueError("No BROKERAGE account found")
+        account_id = brokerage_account["accountId"]
 
         # Owned Stocks
         url = "https://api.public.com/userapigateway/trading/{accountId}/portfolio/v2"
@@ -165,10 +170,10 @@ def fetch_access_token_and_account_id():
             "Content-Type": "application/json"
         }
         last_token_fetch_time = datetime.now()
-        logging.info("Successfully fetched new access token and account ID")
+        logging.info(f"Successfully fetched new access token and BROKERAGE account ID: {account_id}")
         return True
     except Exception as e:
-        logging.error(f"Failed to fetch access token or account ID: {str(e)}")
+        logging.error(f"Failed to fetch access token or BROKERAGE account ID: {str(e)}")
         logging.info("Retrying token fetch in 2 minutes...")
         time.sleep(120)  # Wait 2 minutes before retrying
         return False
@@ -181,7 +186,7 @@ def client_get_account():
         resp = requests.get(f"{BASE_URL}/v1/accounts", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        account = data.get('accounts', [{}])[0]
+        account = next((acc for acc in data.get('accounts', [{}]) if acc.get('accountId') == account_id), {})
         print(data)  # Core API code requirement
         print(f"Current date and time: {datetime.now()}")
         print()  # Empty print statement for spacing
@@ -190,7 +195,7 @@ def client_get_account():
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
-            'accountId': account.get('accountId', account_id),  # Use global account_id if needed
+            'accountId': account.get('accountId', account_id),  # Use global account_id
             'raw': account
         }
     except (HTTPError, ConnectionError, Timeout) as e:
@@ -206,7 +211,7 @@ def client_list_positions():
     """
     try:
         if not account_id:
-            logging.error("No accountId available")
+            logging.error("No BROKERAGE accountId available")
             return []
 
         # Fetch positions from portfolio/v2 endpoint
@@ -419,13 +424,13 @@ def trading_robot(interval=120):
 
     while True:
         try:
-            # Fetch new access token and account ID if none exist or 24 hours have elapsed
+            # Fetch new access token and BROKERAGE account ID if none exist or 24 hours have elapsed
             current_time = datetime.now()
             if (access_token is None or 
                 last_token_fetch_time is None or 
                 (current_time - last_token_fetch_time).total_seconds() >= 86400):
                 if not fetch_access_token_and_account_id():
-                    logging.error("Failed to fetch access token or account ID, retrying in main loop")
+                    logging.error("Failed to fetch access token or BROKERAGE account ID, retrying in main loop")
                     time.sleep(120)
                     continue
 
