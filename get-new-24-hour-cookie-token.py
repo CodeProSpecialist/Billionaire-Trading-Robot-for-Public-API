@@ -3,10 +3,10 @@ import requests
 import uuid
 
 # below is correct API secret key reading code
-# secret = os.getenv("YOUR_SECRET_KEY")
+# secret = os.YOUR_SECRET_KEY
 
 # Permanent secret
-secret = os.getenv("YOUR_SECRET_KEY")
+secret = os.YOUR_SECRET_KEY
 if not YOUR_SECRET_KEY:
     raise ValueError("Please set YOUR_SECRET_KEY in your environment.")
 
