@@ -21,7 +21,7 @@ if not secret_key:
     raise ValueError("PUBLIC_API_ACCESS_TOKEN environment variable is not set.")
 
 HEADERS = {"Authorization": f"Bearer {secret_key}", "Content-Type": "application/json"}
-BASE_URL = "https://api.public.com/userapigateway"  # Verify this is the correct base URL
+BASE_URL = "https://api.public.com/userapigateway"
 
 # --- Flags ---
 FRACTIONAL_BUY_ORDERS = True
@@ -86,10 +86,10 @@ nyse_cal = mcal.get_calendar('NYSE')
 
 def robot_can_run():
     """
-    Determines if the trading robot can run now:
+    Determines if trading actions (buy/sell) are allowed:
     - Fractional buys only during regular market hours
     - Whole shares allowed in pre-market or post-market
-    Returns: (can_run: bool, message: str)
+    Returns: (can_trade: bool, message: str)
     """
     now = datetime.now(eastern)
     schedule = nyse_cal.schedule(start_date=now.date(), end_date=now.date())
@@ -121,31 +121,46 @@ def client_get_account():
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
+            'accountId': account.get('accountId', ''),  # Extract accountId
             'raw': account
         }
     except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Account fetch error: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'raw': {}}
+        return {'equity': 0.0, 'cash': 0.0, 'accountId': '', 'raw': {}}
     except Exception as e:
         logging.error(f"Unexpected error fetching account: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'raw': {}}
+        return {'equity': 0.0, 'cash': 0.0, 'accountId': '', 'raw': {}}
 
 def client_list_positions():
     """
-    Fetch current positions from Public.com API.
-    Adjust endpoint and response parsing based on actual Public.com API documentation.
+    Fetch current positions from Public.com API using portfolio/v2 endpoint.
     """
     try:
-        resp = requests.get(f"{BASE_URL}/v1/positions", headers=HEADERS, timeout=10)
+        # Get accountId from client_get_account
+        account = client_get_account()
+        account_id = account.get('accountId')
+        if not account_id:
+            logging.error("No accountId found in account data")
+            return []
+
+        # Fetch positions from portfolio/v2 endpoint
+        resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        pos_list = resp.json().get('positions', [])
+        data = resp.json()
+        pos_list = data.get('positions', [])
         out = []
         for p in pos_list:
-            sym = p.get('symbol')
+            sym = p.get('instrument', {}).get('symbol')
             qty = float(p.get('quantity', 0))
-            avg = float(p.get('average_price', 0))
-            date_str = p.get('purchase_date', datetime.now(eastern).strftime("%Y-%m-%d"))
-            out.append({'symbol': sym, 'qty': qty, 'avg_price': avg, 'purchase_date': date_str})
+            avg = float(p.get('costBasis', {}).get('unitCost', 0))
+            # Convert openedAt to YYYY-MM-DD in Eastern Time
+            opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
+            try:
+                date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
+            except ValueError:
+                date_str = datetime.now(eastern).strftime("%Y-%m-%d")
+            if sym and qty > 0:  # Only include valid positions
+                out.append({'symbol': sym, 'qty': qty, 'avg_price': avg, 'purchase_date': date_str})
         return out
     except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Positions fetch error: {e}")
@@ -337,26 +352,38 @@ def trading_robot(interval=120):
     while True:
         try:
             # Print current date and time in Eastern Time
-            current_time = datetime.now(eastern).strftime("%Y-%m-%d %I:%M:%S %p %Z")
-            print(f"Current Time: {current_time}")
+            current_time = datetime.now(eastern)
+            print(f"Current Time: {current_time.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
 
-            #can_run, msg = robot_can_run()
-            #print(msg)
-            #if not can_run:
-                #time.sleep(300)
-                #continue
+            # Check if time is past 8:00 PM EDT
+            stop_time = current_time.replace(hour=20, minute=0, second=0, microsecond=0)
+            if current_time >= stop_time:
+                print("Stopping bot: Current time is at or past 8:00 PM EDT")
+                logging.info("Bot stopped at 8:00 PM EDT")
+                break
+
+            can_trade, msg = robot_can_run()
+            print(msg)
 
             # Print account summary
             acc = client_get_account()
             print(f"Equity: ${acc['equity']:.2f} | Cash: ${acc['cash']:.2f}")
+
+            # Print owned positions with color based on current price vs avg price
             positions = client_list_positions()
-            print("Positions:")
+            print("Owned Positions:")
+            if not positions:
+                print("  No positions held.")
             for p in positions:
-                cur = client_get_quote(p['symbol']) or 0
-                pct = (cur - p['avg_price']) / p['avg_price'] * 100 if p['avg_price'] else 0
-                color = "\033[92m" if pct > 0 else "\033[91m"
+                cur_price = client_get_quote(p['symbol']) or 0
+                price_color = "\033[92m" if cur_price > p['avg_price'] else "\033[91m"
                 reset = "\033[0m"
-                print(f"{p['symbol']} | Qty: {p['qty']} | Avg: {p['avg_price']:.2f} | Cur: {cur:.2f} | Change: {color}{pct:.2f}%{reset}")
+                pct = (cur_price - p['avg_price']) / p['avg_price'] * 100 if p['avg_price'] else 0
+                print(f"  {p['symbol']} | Qty: {p['qty']} | Avg Price: ${p['avg_price']:.2f} | Current Price: {price_color}${cur_price:.2f}{reset} | Change: {pct:.2f}%")
+
+            if not can_trade:
+                time.sleep(300)
+                continue
 
             # Sell first
             sell_stocks()
