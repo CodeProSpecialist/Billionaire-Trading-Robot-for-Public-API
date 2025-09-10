@@ -2,7 +2,7 @@ import os
 import requests
 
 # Get account ID from environment variable
-account_Id = os.getenv("ACCOUNT_ID")
+account_Id = os.ACCOUNT_ID
 if not account_Id:
     raise ValueError("Please set the ACCOUNT_ID environment variable.")
 
@@ -11,7 +11,7 @@ url = f"https://api.public.com/userapigateway/trading/{account_Id}/portfolio/v2"
 
 # If an API token is needed, include it here
 headers = {
-    "Authorization": f"Bearer {os.getenv('YOUR_API_KEY')}",  # optional
+    "Authorization": f"Bearer {os.YOUR_API_KEY)}",  # optional
     "Content-Type": "application/json"
 }
 
