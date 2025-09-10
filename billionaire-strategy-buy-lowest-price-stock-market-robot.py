@@ -18,7 +18,7 @@ from requests.exceptions import HTTPError, ConnectionError, Timeout
 # Core API code (must match exactly)
 secret = os.getenv("YOUR_SECRET_KEY")
 
-HEADERS = {"Authorization": f"Bearer {secret_key}", "Content-Type": "application/json"}
+HEADERS = {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
 BASE_URL = "https://api.public.com/userapigateway"
 
 # --- Flags ---
