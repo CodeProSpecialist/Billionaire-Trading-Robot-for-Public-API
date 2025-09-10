@@ -11,7 +11,7 @@ url = f"https://api.public.com/userapigateway/trading/{account_Id}/portfolio/v2"
 
 # If an API token is needed, include it here
 headers = {
-    "Authorization": f"Bearer {os.YOUR_API_KEY)}",  # optional
+    "Authorization": f"Bearer {os.YOUR_API_KEY}",  # optional
     "Content-Type": "application/json"
 }
 
