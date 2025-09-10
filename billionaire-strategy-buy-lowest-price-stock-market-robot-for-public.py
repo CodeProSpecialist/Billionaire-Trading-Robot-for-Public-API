@@ -309,7 +309,7 @@ def buy_stocks(symbols):
         for f in bullish_patterns:
             res = f(open_, high, low, close)
             if res[-1] > 0:
-                score += 1
+                score += 2
                 break
 
         # RSI decrease
@@ -319,9 +319,9 @@ def buy_stocks(symbols):
 
         # Price decrease 0.3%
         if close[-1] <= close[-2] * 0.997:
-            score += 1
+            score += 2
 
-        if score < 4:
+        if score < 5:
             continue
 
         # Determine buy quantity
