@@ -321,7 +321,7 @@ def buy_stocks(symbols):
         if close[-1] <= close[-2] * 0.997:
             score += 1
 
-        if score < 3:
+        if score < 4:
             continue
 
         # Determine buy quantity
