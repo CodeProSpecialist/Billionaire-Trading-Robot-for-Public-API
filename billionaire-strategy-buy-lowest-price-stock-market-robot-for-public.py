@@ -14,6 +14,7 @@ import pandas_market_calendars as mcal
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 from requests.exceptions import HTTPError, ConnectionError, Timeout
+from ratelimit import limits, sleep_and_retry
 
 # Global variables
 YOUR_SECRET_KEY = "YOUR_SECRET_KEY"
@@ -285,8 +286,10 @@ def client_place_order(symbol, qty, side, price=None):
         logging.error(f"Unexpected error placing order for {symbol} on BROKERAGE account {account_id}: {e}")
         return None
 
+@sleep_and_retry
+@limits(calls=60, period=60)
 def client_get_quote(symbol):
-    """Fetch latest quote using yfinance."""
+    """Fetch latest quote using yfinance, limited to 60 calls per minute."""
     try:
         df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
         return float(df['Close'].iloc[-1])
