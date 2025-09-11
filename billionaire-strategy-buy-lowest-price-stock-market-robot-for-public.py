@@ -13,7 +13,6 @@ import talib
 import pandas_market_calendars as mcal
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 
 # Global variables
@@ -135,7 +134,7 @@ def fetch_access_token_and_account_id():
         access_token = response.json()["accessToken"]
 
         # Account Information
-        url = "https://api.public.com/userapigateway/trading/account"
+        url = f"{BASE_URL}/v1/accounts"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
@@ -144,25 +143,12 @@ def fetch_access_token_and_account_id():
         response = requests.get(url, headers=headers)
         response.raise_for_status()  # Raise an exception for bad status codes
         data = response.json()
-        print(data)
 
         # Filter for BROKERAGE account
         brokerage_account = next((acc for acc in data["accounts"] if acc.get("accountType") == "BROKERAGE"), None)
         if not brokerage_account:
             raise ValueError("No BROKERAGE account found")
         account_id = brokerage_account["accountId"]
-
-        # Owned Stocks
-        url = "https://api.public.com/userapigateway/trading/{accountId}/portfolio/v2"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.get(url.format(accountId=account_id), headers=headers)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        data = response.json()
-        #print(data)
 
         # Update HEADERS with new access token
         HEADERS = {
@@ -180,46 +166,47 @@ def fetch_access_token_and_account_id():
 
 def client_get_account():
     """
-    Fetch account details from Public.com API.
+    Fetch account details for BROKERAGE account from Public.com API.
     """
     try:
-        resp = requests.get(f"{BASE_URL}/v1/accounts", headers=HEADERS, timeout=10)
+        if not account_id:
+            logging.error("No BROKERAGE accountId available")
+            return {'equity': 0.0, 'cash': 0.0, 'accountId': None, 'raw': {}}
+        
+        resp = requests.get(f"{BASE_URL}/v1/accounts/{account_id}", headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        account = next((acc for acc in data.get('accounts', [{}]) if acc.get('accountId') == account_id), {})
-        print(data)  # Core API code requirement
-        print(f"Current date and time: {datetime.now()}")
+        account = resp.json()
+        print(account)  # Core API code requirement
+        print(f"Current date and time: {datetime.now(eastern).strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
         print()  # Empty print statement for spacing
         next_run = datetime.now(eastern) + timedelta(seconds=120)
         print(f"Next run time: {next_run.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
-            'accountId': account.get('accountId', account_id),  # Use global account_id
+            'accountId': account.get('accountId', account_id),
             'raw': account
         }
     except (HTTPError, ConnectionError, Timeout) as e:
-        logging.error(f"Account fetch error: {e}")
+        logging.error(f"Account fetch error for BROKERAGE account {account_id}: {e}")
         return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
     except Exception as e:
-        logging.error(f"Unexpected error fetching account: {e}")
+        logging.error(f"Unexpected error fetching BROKERAGE account {account_id}: {e}")
         return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
 
 def client_list_positions():
     """
-    Fetch current positions from Public.com API using portfolio/v2 endpoint.
+    Fetch current positions for BROKERAGE account from Public.com API using portfolio/v2 endpoint.
     """
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId available")
             return []
 
-        # Fetch positions from portfolio/v2 endpoint
         resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        #print(data)  # Core API code requirement (commented out)
-        logging.info(f"Portfolio data: {data}")  # Log for consistency
+        logging.info(f"Portfolio data for BROKERAGE account {account_id}: {data}")
         pos_list = data.get('positions', [])
         out = []
         for p in pos_list:
@@ -232,21 +219,25 @@ def client_list_positions():
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
             except ValueError:
                 date_str = datetime.now(eastern).strftime("%Y-%m-%d")
-            if sym and qty > 0:  # Only include valid positions
+            if sym and qty > 0:
                 out.append({'symbol': sym, 'qty': qty, 'avg_price': avg, 'purchase_date': date_str})
         return out
     except (HTTPError, ConnectionError, Timeout) as e:
-        logging.error(f"Positions fetch error: {e}")
+        logging.error(f"Positions fetch error for BROKERAGE account {account_id}: {e}")
         return []
     except Exception as e:
-        logging.error(f"Unexpected error fetching positions: {e}")
+        logging.error(f"Unexpected error fetching positions for BROKERAGE account {account_id}: {e}")
         return []
 
 def client_place_order(symbol, qty, side, price=None):
     """
-    Place a buy or sell order via Public.com API.
+    Place a buy or sell order for BROKERAGE account via Public.com API.
     """
     try:
+        if not account_id:
+            logging.error("No BROKERAGE accountId available")
+            return None
+        
         order_type = "market" if price is None else "limit"
         payload = {
             "symbol": symbol,
@@ -258,16 +249,16 @@ def client_place_order(symbol, qty, side, price=None):
         if price:
             payload["price"] = price
 
-        resp = requests.post(f"{BASE_URL}/v1/orders", json=payload, headers=HEADERS, timeout=10)
+        resp = requests.post(f"{BASE_URL}/v1/orders/{account_id}", json=payload, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         order = resp.json()
-        logging.info(f"Order placed: {side} {qty} of {symbol} at {order_type} price")
+        logging.info(f"Order placed for BROKERAGE account {account_id}: {side} {qty} of {symbol} at {order_type} price")
         return order
     except (HTTPError, ConnectionError, Timeout) as e:
-        logging.error(f"Order placement error for {symbol}: {e}")
+        logging.error(f"Order placement error for {symbol} on BROKERAGE account {account_id}: {e}")
         return None
     except Exception as e:
-        logging.error(f"Unexpected error placing order for {symbol}: {e}")
+        logging.error(f"Unexpected error placing order for {symbol} on BROKERAGE account {account_id}: {e}")
         return None
 
 def client_get_quote(symbol):
@@ -292,13 +283,14 @@ def buy_stocks(symbols):
         if current_price is None or cash < 3.0:  # leave $2 buffer
             continue
 
-        # --- Score calculation ---
+        # --- Score calculation (Updated) ---
         score = 0
         df = yf.Ticker(sym.replace('.', '-')).history(period="20d")
         close = df['Close'].values
         open_ = df['Open'].values
         high = df['High'].values
         low = df['Low'].values
+        volume = df['Volume'].values  # Added for volume check
 
         # Candlestick bullish reversal patterns
         bullish_patterns = [
@@ -312,16 +304,27 @@ def buy_stocks(symbols):
                 score += 2
                 break
 
-        # RSI decrease
+        # RSI oversold bounce (improved from original RSI < 50)
         rsi = talib.RSI(close)
-        if rsi[-1] < 50:
+        if len(rsi) >= 2 and rsi[-2] < 30 and rsi[-1] > rsi[-2]:
             score += 1
 
         # Price decrease 0.3%
         if close[-1] <= close[-2] * 0.997:
             score += 2
 
-        if score < 5:
+        # NEW: Low volume (below 10-day SMA)
+        if len(volume) >= 10:
+            avg_vol = talib.SMA(volume, timeperiod=10)[-1]
+            if volume[-1] < avg_vol:
+                score += 1
+
+        # NEW: Favorable MACD (MACD > signal)
+        macd, signal, _ = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+        if len(macd) >= 1 and macd[-1] > signal[-1]:
+            score += 1
+
+        if score < 4:  # Threshold set to 4
             continue
 
         # Determine buy quantity
@@ -334,7 +337,7 @@ def buy_stocks(symbols):
         # Place buy order
         order = client_place_order(sym, qty, "buy")
         if order:
-            logging.info(f"Buying {qty} of {sym} at {current_price}")
+            logging.info(f"Buying {qty} of {sym} at {current_price} for BROKERAGE account {account_id}")
             cash -= qty * current_price
 
             # Record CSV
@@ -362,7 +365,7 @@ def buy_stocks(symbols):
                 session.add(trade)
                 session.commit()
             except SQLAlchemyError as e:
-                logging.error(f"DB error saving trade for {sym}: {e}")
+                logging.error(f"DB error saving trade for {sym} on BROKERAGE account {account_id}: {e}")
                 session.rollback()
             finally:
                 session.close()
@@ -384,7 +387,7 @@ def sell_stocks():
         if cur_price >= 1.005 * p['avg_price']:
             order = client_place_order(p['symbol'], p['qty'], "sell")
             if order:
-                logging.info(f"Selling {p['qty']} of {p['symbol']} at {cur_price}")
+                logging.info(f"Selling {p['qty']} of {p['symbol']} at {cur_price} for BROKERAGE account {account_id}")
                 with open(CSV_FILENAME, 'a', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                     writer.writerow({
@@ -410,7 +413,7 @@ def sell_stocks():
                     session.query(Position).filter(Position.symbols == p['symbol']).delete()
                     session.commit()
                 except SQLAlchemyError as e:
-                    logging.error(f"DB error saving trade for {p['symbol']}: {e}")
+                    logging.error(f"DB error saving trade for {p['symbol']} on BROKERAGE account {account_id}: {e}")
                     session.rollback()
                 finally:
                     session.close()
