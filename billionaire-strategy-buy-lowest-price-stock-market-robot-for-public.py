@@ -13,6 +13,7 @@ import talib
 import pandas_market_calendars as mcal
 from sqlalchemy import create_engine, Column, Integer, String, Float, text
 from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
 
@@ -204,24 +205,31 @@ def client_get_account():
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId available")
-            return {'equity': 0.0, 'cash': 0.0, 'accountId': None, 'raw': {}}
+            return {'equity': 0.0, 'buying_power_cash': 0.0, 'cash_only_buying_power': 0.0, 'cash_on_hand': 0.0, 'accountId': None, 'raw': {}}
         
-        resp = requests.get(f"{BASE_URL}/v1/accounts/{account_id}", headers=HEADERS, timeout=10)
+        resp = requests.get(f"{BASE_URL}/trading/{account_id}/portfolio/v2", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         account = resp.json()
-        print(account)
+        equity_list = account.get('equity', [])
+        total_equity = sum(float(e.get('value', 0)) for e in equity_list)
+        cash_on_hand = sum(float(e.get('value', 0)) for e in equity_list if e.get('type') == 'CASH')
+        buying_power_dict = account.get('buyingPower', {})
+        buying_power_cash = float(buying_power_dict.get('buyingPower', 0))
+        cash_only_buying_power = float(buying_power_dict.get('cashOnlyBuyingPower', 0))
         return {
-            'equity': float(account.get('equity', 0)),
-            'cash': float(account.get('cash', 0)),
+            'equity': total_equity,
+            'buying_power_cash': buying_power_cash,
+            'cash_only_buying_power': cash_only_buying_power,
+            'cash_on_hand': cash_on_hand,
             'accountId': account.get('accountId', account_id),
             'raw': account
         }
     except (HTTPError, ConnectionError, Timeout) as e:
         logging.error(f"Account fetch error for BROKERAGE account {account_id}: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
+        return {'equity': 0.0, 'buying_power_cash': 0.0, 'cash_only_buying_power': 0.0, 'cash_on_hand': 0.0, 'accountId': account_id, 'raw': {}}
     except Exception as e:
         logging.error(f"Unexpected error fetching BROKERAGE account {account_id}: {e}")
-        return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
+        return {'equity': 0.0, 'buying_power_cash': 0.0, 'cash_only_buying_power': 0.0, 'cash_on_hand': 0.0, 'accountId': account_id, 'raw': {}}
 
 def client_list_positions():
     """Fetch current positions for BROKERAGE account."""
@@ -299,7 +307,7 @@ def client_get_quote(symbol):
 
 def buy_stocks(symbols):
     account = client_get_account()
-    cash = account['cash']
+    cash = account['buying_power_cash']
     positions = client_list_positions()
     today_str = datetime.now(eastern).strftime("%Y-%m-%d")
 
@@ -495,7 +503,7 @@ def trading_robot(interval=30):
 
             # Print account summary
             acc = client_get_account()
-            print(f"Equity: ${acc['equity']:.2f} | Cash: ${acc['cash']:.2f}")
+            print(f"Equity: ${acc['equity']:.2f} | Account Buying Power Cash: ${acc['buying_power_cash']:.2f} | Cash Only Buying Power: ${acc['cash_only_buying_power']:.2f} | Cash on Hand: ${acc['cash_on_hand']:.2f}")
 
             # Print day trades
             day_trades = count_day_trades()
