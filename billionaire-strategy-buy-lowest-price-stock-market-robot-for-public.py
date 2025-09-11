@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 import os
 import time
@@ -16,6 +17,12 @@ from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
+import numpy as np
+
+# ANSI color codes for terminal output
+GREEN = "\033[92m"
+RED = "\033[91m"
+RESET = "\033[0m"
 
 # Global variables
 YOUR_SECRET_KEY = "YOUR_SECRET_KEY"
@@ -71,6 +78,19 @@ SessionLocal = scoped_session(sessionmaker(bind=engine))
 Base.metadata.create_all(engine)
 
 SYMBOLS_FILE = "electricity-or-utility-stocks-to-buy-list.txt"
+
+# Additional globals from Alpaca script
+price_history = {}  # symbols -> interval -> list of prices
+last_stored = {}  # symbols -> interval -> last_timestamp
+interval_map = {
+    '1min': 60,
+    '5min': 300,
+    '10min': 600,
+    '15min': 900,
+    '30min': 1800,
+    '45min': 2700,
+    '60min': 3600
+}  # intervals in seconds
 
 def load_symbols_from_file(file_path=SYMBOLS_FILE):
     symbols = []
@@ -211,11 +231,11 @@ def client_get_account():
         resp.raise_for_status()
         account = resp.json()
         equity_list = account.get('equity', [])
-        total_equity = sum(float(e.get('value', 0)) for e in equity_list)
-        cash_on_hand = sum(float(e.get('value', 0)) for e in equity_list if e.get('type') == 'CASH')
+        total_equity = round(sum(float(e.get('value', 0)) for e in equity_list), 2)
+        cash_on_hand = round(sum(float(e.get('value', 0)) for e in equity_list if e.get('type') == 'CASH'), 2)
         buying_power_dict = account.get('buyingPower', {})
-        buying_power_cash = float(buying_power_dict.get('buyingPower', 0))
-        cash_only_buying_power = float(buying_power_dict.get('cashOnlyBuyingPower', 0))
+        buying_power_cash = round(float(buying_power_dict.get('buyingPower', 0)), 2)
+        cash_only_buying_power = round(float(buying_power_dict.get('cashOnlyBuyingPower', 0)), 2)
         return {
             'equity': total_equity,
             'buying_power_cash': buying_power_cash,
@@ -247,7 +267,7 @@ def client_list_positions():
         for p in pos_list:
             sym = p.get('instrument', {}).get('symbol')
             qty = float(p.get('quantity', 0))
-            avg = float(p.get('costBasis', {}).get('unitCost', 0))
+            avg = round(float(p.get('costBasis', {}).get('unitCost', 0)), 2)
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
             try:
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
@@ -280,7 +300,7 @@ def client_place_order(symbol, qty, side, price=None):
             "accountId": account_id
         }
         if price:
-            payload["price"] = price
+            payload["price"] = round(price, 2)
 
         resp = requests.post(f"{BASE_URL}/v1/orders", json=payload, headers=HEADERS, timeout=10)
         resp.raise_for_status()
@@ -300,115 +320,614 @@ def client_get_quote(symbol):
     """Fetch latest quote using yfinance, limited to 60 calls per minute."""
     try:
         df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
-        return float(df['Close'].iloc[-1])
+        return round(float(df['Close'].iloc[-1]), 2)
     except Exception as e:
         logging.error(f"Quote fetch error for {symbol}: {e}")
         return None
 
-def buy_stocks(symbols):
-    account = client_get_account()
-    cash = account['buying_power_cash']
-    positions = client_list_positions()
-    today_str = datetime.now(eastern).strftime("%Y-%m-%d")
+# Ported helper functions from Alpaca script
+def calculate_technical_indicators(symbols, lookback_days=90):
+    print(f"Calculating technical indicators for {symbols} over {lookback_days} days...")
+    yf_symbol = symbols.replace('.', '-')  # Adjust for yfinance compatibility
+    stock_data = yf.Ticker(yf_symbol)
+    historical_data = stock_data.history(period=f'{lookback_days}d')
+    short_window = 12
+    long_window = 26
+    signal_window = 9
+    historical_data['macd'], historical_data['signal'], _ = talib.MACD(historical_data['Close'],
+                                                                       fastperiod=short_window,
+                                                                       slowperiod=long_window,
+                                                                       signalperiod=signal_window)
+    rsi_period = 14
+    historical_data['rsi'] = talib.RSI(historical_data['Close'], timeperiod=rsi_period)
+    historical_data['volume'] = historical_data['Volume']
+    print(f"Technical indicators calculated for {yf_symbol}.")
+    return historical_data
 
+def get_average_true_range(symbols):
+    """
+    Calculate the Average True Range (ATR) for a given stock symbol.
+    """
+    print(f"Calculating ATR for {symbols}...")
+
+    def _fetch_atr(symbols):
+        yf_symbol = symbols.replace('.', '-')  # Adjust for yfinance compatibility
+        ticker = yf.Ticker(yf_symbol)
+        data = ticker.history(period='30d')
+        try:
+            atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
+            atr_value = round(atr[-1], 2)
+            print(f"ATR for {yf_symbol}: {atr_value:.2f}")
+            return atr_value
+        except Exception as e:
+            logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
+            print(f"Error calculating ATR for {yf_symbol}: {e}")
+            return None
+
+    return _fetch_atr(symbols)
+
+def is_in_uptrend(symbols_to_buy):
+    print(f"Checking if {symbols_to_buy} is in uptrend (above 200-day SMA)...")
+    yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
+    stock_data = yf.Ticker(yf_symbol)
+    historical_data = stock_data.history(period='200d')
+    if historical_data.empty or len(historical_data) < 200:
+        print(f"Insufficient data for 200-day SMA for {yf_symbol}. Assuming not in uptrend.")
+        return False
+    sma_200 = round(talib.SMA(historical_data['Close'].values, timeperiod=200)[-1], 2)
+    current_price = client_get_quote(symbols_to_buy)
+    in_uptrend = current_price > sma_200 if current_price else False
+    print(
+        f"{yf_symbol} {'is' if in_uptrend else 'is not'} in uptrend (Current: {current_price:.2f}, SMA200: {sma_200:.2f})")
+    return in_uptrend
+
+def get_daily_rsi(symbols_to_buy):
+    print(f"Calculating daily RSI for {symbols_to_buy}...")
+    yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
+    stock_data = yf.Ticker(yf_symbol)
+    historical_data = stock_data.history(period='30d', interval='1d')
+    if historical_data.empty:
+        print(f"No daily data for {yf_symbol}. RSI calculation failed.")
+        return None
+    rsi = talib.RSI(historical_data['Close'], timeperiod=14)[-1]
+    rsi_value = round(rsi, 2) if not np.isnan(rsi) else None
+    print(f"Daily RSI for {yf_symbol}: {rsi_value}")
+    return rsi_value
+
+def get_last_price_within_past_5_minutes(symbols_to_buy_list):
+    print("Fetching last prices within past 5 minutes for symbols...")
+    results = {}
+    eastern = pytz.timezone('US/Eastern')
+    current_datetime = datetime.now(eastern)
+    end_time = current_datetime
+    start_time = end_time - timedelta(minutes=5)
+
+    for symbols_to_buy in symbols_to_buy_list:
+        print(f"Fetching 5-minute price data for {symbols_to_buy}...")
+        try:
+            yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
+            data = yf.download(yf_symbol, start=start_time, end=end_time, interval='1m', prepost=True, auto_adjust=False)
+            if not data.empty:
+                last_price = round(float(data['Close'].iloc[-1].item()), 2)
+                results[symbols_to_buy] = last_price
+                print(f"Last price for {yf_symbol} within 5 minutes: ${last_price:.2f}")
+            else:
+                results[symbols_to_buy] = None
+                print(f"No price data found for {yf_symbol} within past 5 minutes.")
+        except Exception as e:
+            print(f"Error occurred while fetching data for {yf_symbol}: {e}")
+            logging.error(f"Error occurred while fetching data for {yf_symbol}: {e}")
+            results[symbols_to_buy] = None
+
+    return results
+
+def print_database():
+    """Print trade history and positions from the database, including current price and % change."""
+    if not PRINT_DB_TRADES:
+        return
+
+    session = SessionLocal()
+    try:
+        print("\nTrade History In This Robot's Database:")
+        print("\nStock | Buy or Sell | Quantity | Avg. Price | Date")
+        print("---------------------------------------------------")
+        trades = session.query(TradeHistory).all()
+        if not trades:
+            print("No trade history found.")
+        for record in trades:
+            print(f"{record.symbols} | {record.action.capitalize()} | {record.quantity:.4f} | ${record.price:.2f} | {record.date}")
+
+        print("\n---------------------------------------------------")
+        print("Positions in the Database To Sell On or After the Date Shown:")
+        print("\nStock | Quantity | Avg. Price | Date | Current Price | % Change")
+        print("---------------------------------------------------")
+        positions = session.query(Position).all()
+        if not positions:
+            print("No positions held.")
+        for record in positions:
+            current_price = client_get_quote(record.symbols)
+            percentage_change = ((current_price - record.avg_price) / record.avg_price * 100) if current_price and record.avg_price else 0
+            color = GREEN if percentage_change >= 0 else RED
+            print(f"{record.symbols} | {record.quantity:.4f} | ${record.avg_price:.2f} | {record.purchase_date} | {color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
+        print("\n")
+    except Exception as e:
+        logging.error(f"Error printing database: {e}")
+        print(f"Error printing database: {e}")
+    finally:
+        session.close()
+
+def buy_stocks(symbols):
+    print("Starting buy_stocks function...")
+    global price_history, last_stored
+    if not symbols:
+        print("No symbols to buy.")
+        logging.info("No symbols to buy.")
+        return
+    symbols_to_remove = []
+
+    # Get total equity for risk calculations
+    print("Fetching account equity for risk calculations...")
+    acc = client_get_account()
+    total_equity = acc['equity']
+    print(f"Total account equity: ${total_equity:.2f}")
+
+    # Track open positions for portfolio risk cap (max 98% equity in open positions)
+    print("Checking current portfolio exposure...")
+    positions = client_list_positions()
+    current_exposure = 0.0
+    for p in positions:
+        cur_price = client_get_quote(p['symbol']) or p['avg_price']
+        current_exposure += p['qty'] * cur_price
+    current_exposure = round(current_exposure, 2)
+    max_new_exposure = round(total_equity * 0.98 - current_exposure, 2)
+    if max_new_exposure <= 0:
+        print("Portfolio exposure limit reached. No new buys.")
+        logging.info("Portfolio exposure limit reached. No new buys.")
+        return
+    print(f"Current exposure: ${current_exposure:.2f}, Max new exposure: ${max_new_exposure:.2f}")
+
+    # Track processed symbols for dynamic allocation
+    processed_symbols = 0
+    valid_symbols = []
+
+    # First pass: Filter valid symbols to avoid wasting allocations
+    print("Filtering valid symbols for buying...")
     for sym in symbols:
         current_price = client_get_quote(sym)
-        if current_price is None or cash < 3.0:
-            print(f"  {sym}: Skipped (No price data or insufficient cash)")
+        if current_price is None:
+            print(f"No valid price data for {sym}. Skipping.")
+            logging.info(f"No valid price data for {sym}.")
+            continue
+        historical_data = calculate_technical_indicators(sym, lookback_days=5)
+        if historical_data.empty:
+            print(f"No historical data for {sym}. Skipping.")
+            logging.info(f"No historical data for {sym}.")
+            continue
+        valid_symbols.append(sym)
+    print(f"Valid symbols to process: {valid_symbols}")
+
+    # Check if there are valid symbols
+    if not valid_symbols:
+        print("No valid symbols to buy after filtering.")
+        logging.info("No valid symbols to buy after filtering.")
+        return
+
+    today_str = datetime.now(eastern).strftime("%Y-%m-%d")
+    # Process each valid symbol
+    for sym in valid_symbols:
+        print(f"Processing {sym}...")
+        processed_symbols += 1
+        current_datetime = datetime.now(eastern)
+        current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+
+        # Fetch current data
+        current_price = client_get_quote(sym)
+        if current_price is None:
+            print(f"No valid price data for {sym}.")
+            logging.info(f"No valid price data for {sym}.")
+            continue
+
+        # Update price history for the symbol at specified intervals
+        current_timestamp = time.time()
+        if sym not in price_history:
+            price_history[sym] = {interval: [] for interval in interval_map}
+            last_stored[sym] = {interval: 0 for interval in interval_map}
+        for interval, delta in interval_map.items():
+            if current_timestamp - last_stored[sym][interval] >= delta:
+                price_history[sym][interval].append(current_price)
+                last_stored[sym][interval] = current_timestamp
+                print(f"Stored price ${current_price:.2f} for {sym} at {interval} interval.")
+                logging.info(f"Stored price ${current_price:.2f} for {sym} at {interval} interval.")
+
+        # Get historical data for volume, RSI, and candlesticks
+        yf_symbol = sym.replace('.', '-')  # Adjust for yfinance compatibility
+        print(f"Fetching 20-day historical data for {yf_symbol}...")
+        df = yf.Ticker(yf_symbol).history(period="20d")
+        if df.empty or len(df) < 3:
+            print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
+            logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}).")
             continue
 
         # --- Score calculation ---
         score = 0
-        df = yf.Ticker(sym.replace('.', '-')).history(period="20d")
         close = df['Close'].values
         open_ = df['Open'].values
         high = df['High'].values
         low = df['Low'].values
-        volume = df['Volume'].values
 
         # Candlestick bullish reversal patterns
         bullish_patterns = [
             talib.CDLHAMMER, talib.CDLHANGINGMAN, talib.CDLENGULFING,
             talib.CDLPIERCING, talib.CDLMORNINGSTAR, talib.CDLINVERTEDHAMMER,
-            talib.CDLDRAGONFLYDOJI, talib.CDLBULLISHENGULFING
+            talib.CDLDRAGONFLYDOJI
         ]
         for f in bullish_patterns:
             res = f(open_, high, low, close)
             if res[-1] > 0:
-                score += 2
+                score += 1
                 break
 
-        # RSI oversold bounce
+        # RSI decrease
         rsi = talib.RSI(close)
-        if len(rsi) >= 2 and rsi[-2] < 30 and rsi[-1] > rsi[-2]:
+        if rsi[-1] < 50:
             score += 1
 
         # Price decrease 0.3%
         if close[-1] <= close[-2] * 0.997:
-            score += 2
-
-        # Low volume (below 10-day SMA)
-        if len(volume) >= 10:
-            avg_vol = talib.SMA(volume, timeperiod=10)[-1]
-            if volume[-1] < avg_vol:
-                score += 1
-
-        # Favorable MACD (MACD > signal)
-        macd, signal, _ = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
-        if len(macd) >= 1 and macd[-1] > signal[-1]:
             score += 1
 
-        # Calculate % change from previous close
-        price_change_pct = ((close[-1] - close[-2]) / close[-2] * 100) if len(close) >= 2 else 0
-        price_color = "\033[92m" if price_change_pct > 0 else "\033[91m" if price_change_pct < 0 else "\033[0m"
-        reset = "\033[0m"
-        print(f"  {sym}: Score={score}, Price={price_color}${close[-1]:.2f}{reset} ({price_color}{price_change_pct:.2f}%{reset})")
-
-        if score < 4:
+        if score < 3:
+            print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
+            logging.info(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
             continue
 
-        # Determine buy quantity
-        qty = round((cash - 2.0) / current_price, 2) if FRACTIONAL_BUY_ORDERS else int((cash - 2.0) / current_price)
-        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
-            qty = round(1.0 / current_price, 2) if FRACTIONAL_BUY_ORDERS else 1
-        if qty <= 0:
-            continue
+        # Calculate volume decrease
+        print(f"Calculating volume metrics for {sym}...")
+        recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
+        prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
+        volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
+        current_volume = df['Volume'].iloc[-1]
+        print(
+            f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
 
-        # Place buy order
-        order = client_place_order(sym, qty, "buy")
-        if order:
-            logging.info(f"Buying {qty} of {sym} at {current_price} for BROKERAGE account {account_id}")
-            cash -= qty * current_price
+        # Calculate RSI decrease
+        print(f"Calculating RSI metrics for {sym}...")
+        close_prices = df['Close'].values
+        rsi_series = talib.RSI(close_prices, timeperiod=14)
+        rsi_decrease = False
+        latest_rsi = rsi_series[-1] if len(rsi_series) > 0 else None
+        if len(rsi_series) >= 10:
+            recent_rsi_values = rsi_series[-5:][~np.isnan(rsi_series[-5:])]
+            prior_rsi_values = rsi_series[-10:-5][~np.isnan(rsi_series[-10:-5])]
+            if len(recent_rsi_values) > 0 and len(prior_rsi_values) > 0:
+                recent_avg_rsi = np.mean(recent_rsi_values)
+                prior_avg_rsi = np.mean(prior_rsi_values)
+                rsi_decrease = recent_avg_rsi < prior_avg_rsi
+            else:
+                recent_avg_rsi = 0
+                prior_avg_rsi = 0
+        else:
+            recent_avg_rsi = 0
+            prior_avg_rsi = 0
+        print(
+            f"{yf_symbol}: Latest RSI = {latest_rsi:.2f}, Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
 
-            # Record CSV
-            with open(CSV_FILENAME, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-                writer.writerow({
-                    'Date': today_str,
-                    'Buy': 'Buy',
-                    'Sell': '',
-                    'Quantity': qty,
-                    'Symbol': sym,
-                    'Price Per Share': round(current_price, 2)
-                })
+        # Calculate MACD
+        print(f"Calculating MACD for {sym}...")
+        short_window = 12
+        long_window = 26
+        signal_window = 9
+        macd, macd_signal, _ = talib.MACD(close_prices, fastperiod=short_window, slowperiod=long_window,
+                                          signalperiod=signal_window)
+        latest_macd = round(macd[-1], 2) if len(macd) > 0 else None
+        latest_macd_signal = round(macd_signal[-1], 2) if len(macd_signal) > 0 else None
+        macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None else False
+        print(
+            f"{yf_symbol}: MACD = {latest_macd:.2f}, Signal = {latest_macd_signal:.2f}, MACD above signal = {macd_above_signal}")
 
-            # Record in DB
-            session = SessionLocal()
+        # Check price increase (for logging)
+        previous_price = current_price  # Simplified, as no previous_prices dict
+        price_increase = current_price > previous_price * 1.005
+        print(
+            f"{yf_symbol}: Price increase check: Current = ${current_price:.2f}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
+
+        # Check price drop
+        print(f"Checking price drop for {sym}...")
+        last_prices = get_last_price_within_past_5_minutes([sym])
+        last_price = last_prices.get(sym)
+        if last_price is None:
             try:
-                trade = TradeHistory(
-                    symbols=sym,
-                    action="buy",
-                    quantity=qty,
-                    price=current_price,
-                    date=today_str
-                )
-                session.add(trade)
-                session.commit()
-            except SQLAlchemyError as e:
-                logging.error(f"DB error saving trade for {sym} on BROKERAGE account {account_id}: {e}")
-                session.rollback()
-            finally:
-                session.close()
+                last_price = round(float(df['Close'].iloc[-1].item()), 2)
+                print(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: ${last_price:.2f}")
+                logging.info(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: ${last_price:.2f}")
+            except Exception as e:
+                print(f"Error fetching last closing price for {yf_symbol}: {e}")
+                logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
+                continue
+
+        price_decline_threshold = round(last_price * (1 - 0.002), 2)
+        price_decline = current_price <= price_decline_threshold
+        print(
+            f"{yf_symbol}: Price decline check: Current = ${current_price:.2f}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
+
+        # Calculate short-term price trend
+        short_term_trend = None
+        if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
+            recent_prices = price_history[sym]['5min'][-2:]
+            short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
+            print(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+            logging.info(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+
+        # Detect bullish reversal candlestick patterns
+        print(f"Checking for bullish reversal patterns in {sym}...")
+        open_prices = df['Open'].values
+        high_prices = df['High'].values
+        low_prices = df['Low'].values
+        close_prices = df['Close'].values
+
+        bullish_reversal_detected = False
+        reversal_candle_index = None
+        detected_patterns = []
+        for i in range(-1, -21, -1):
+            if len(df) < abs(i):
+                continue
+            try:
+                patterns = {
+                    'Hammer': talib.CDLHAMMER(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                              close_prices[:i + 1])[i] != 0,
+                    'Bullish Engulfing':
+                        talib.CDLENGULFING(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                           close_prices[:i + 1])[i] > 0,
+                    'Morning Star': talib.CDLMORNINGSTAR(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                                         close_prices[:i + 1])[i] != 0,
+                    'Piercing Line': talib.CDLPIERCING(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                                       close_prices[:i + 1])[i] != 0,
+                    'Three White Soldiers':
+                        talib.CDL3WHITESOLDIERS(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                                close_prices[:i + 1])[i] != 0,
+                    'Dragonfly Doji':
+                        talib.CDLDRAGONFLYDOJI(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                               close_prices[:i + 1])[i] != 0,
+                    'Inverted Hammer':
+                        talib.CDLINVERTEDHAMMER(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                                close_prices[:i + 1])[i] != 0,
+                    'Tweezer Bottom': talib.CDLMATCHINGLOW(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
+                                                           close_prices[:i + 1])[i] != 0,
+                }
+                current_detected = [name for name, detected in patterns.items() if detected]
+                if current_detected:
+                    bullish_reversal_detected = True
+                    detected_patterns = current_detected
+                    reversal_candle_index = i
+                    break
+            except IndexError as e:
+                print(f"IndexError in candlestick pattern detection for {yf_symbol}: {e}")
+                logging.error(f"IndexError in candlestick pattern detection for {yf_symbol}: {e}")
+                continue
+
+        if detected_patterns:
+            print(
+                f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)}")
+            logging.info(
+                f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)}")
+            if sym in price_history:
+                for interval, prices in price_history[sym].items():
+                    if prices:
+                        print(f"{yf_symbol}: Price history at {interval}: {[round(p, 2) for p in prices[-5:]]}")
+                        logging.info(f"{yf_symbol}: Price history at {interval}: {[round(p, 2) for p in prices[-5:]]}")
+        if price_decline:
+            print(
+                f"{yf_symbol}: Price decline >= 0.2% detected (Current price = ${current_price:.2f}, Threshold = ${price_decline_threshold:.2f})")
+            logging.info(
+                f"{yf_symbol}: Price decline >= 0.2% detected (Current price = ${current_price:.2f}, Threshold = ${price_decline_threshold:.2f})")
+        if volume_decrease:
+            print(
+                f"{yf_symbol}: Volume decrease detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
+            logging.info(
+                f"{yf_symbol}: Volume decrease detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
+        if rsi_decrease:
+            print(
+                f"{yf_symbol}: RSI decrease detected (Recent avg = {recent_avg_rsi:.2f}, Prior avg = {prior_avg_rsi:.2f})")
+            logging.info(
+                f"{yf_symbol}: RSI decrease detected (Recent avg = {recent_avg_rsi:.2f}, Prior avg = {prior_avg_rsi:.2f})")
+
+        # Add trend filter
+        if not is_in_uptrend(sym):
+            print(f"{yf_symbol}: Not in uptrend (below 200-day SMA). Skipping.")
+            logging.info(f"{yf_symbol}: Not in uptrend. Skipping.")
+            continue
+
+        # Add multi-timeframe confirmation
+        daily_rsi = get_daily_rsi(sym)
+        if daily_rsi is None or daily_rsi > 50:
+            print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
+            logging.info(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
+            continue
+
+        # Pattern-specific buy conditions with scoring
+        buy_conditions_met = False
+        specific_reason = ""
+        if bullish_reversal_detected:
+            score += 2
+            price_stable = True
+            if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
+                recent_prices = price_history[sym]['5min'][-2:]
+                price_stable = abs(recent_prices[-1] - recent_prices[-2]) / recent_prices[-2] < 0.005
+                print(f"{yf_symbol}: Price stability check (5min): {price_stable}")
+                logging.info(f"{yf_symbol}: Price stability check (5min): {price_stable}")
+                if price_stable:
+                    score += 1
+
+            if macd_above_signal:
+                score += 1
+            if not volume_decrease:
+                score += 1
+            if rsi_decrease:
+                score += 1
+            if price_decline:
+                score += 1
+
+            for pattern in detected_patterns:
+                if pattern == 'Hammer':
+                    if latest_rsi < 35 and price_decline >= (last_price * 0.003):
+                        score += 1
+                elif pattern == 'Bullish Engulfing':
+                    if recent_avg_volume > 1.5 * prior_avg_volume:
+                        score += 1
+                elif pattern == 'Morning Star':
+                    if latest_rsi < 40:
+                        score += 1
+                elif pattern == 'Piercing Line':
+                    if recent_avg_rsi < 40:
+                        score += 1
+                elif pattern == 'Three White Soldiers':
+                    if not volume_decrease:
+                        score += 1
+                elif pattern == 'Dragonfly Doji':
+                    if latest_rsi < 30:
+                        score += 1
+                elif pattern == 'Inverted Hammer':
+                    if rsi_decrease:
+                        score += 1
+                elif pattern == 'Tweezer Bottom':
+                    if latest_rsi < 40:
+                        score += 1
+
+            if score >= 4:
+                buy_conditions_met = True
+                specific_reason = f"Score: {score}, patterns: {', '.join(detected_patterns)}"
+
+        if not buy_conditions_met:
+            print(f"{yf_symbol}: Buy score too low ({score} < 4). Skipping.")
+            logging.info(f"{yf_symbol}: Buy score too low ({score} < 4). Skipping.")
+            continue
+
+        # Determine position sizing
+        filled_qty = 0
+        filled_price = current_price
+        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
+            total_cost_for_qty = 1.00
+            qty = round(total_cost_for_qty / current_price, 4)
+            print(f"{yf_symbol}: Using $1.00 fractional share order mode. Qty = {qty:.4f}")
+        else:
+            # Volatility-based position sizing
+            print(f"Calculating position size for {sym}...")
+            atr = get_average_true_range(sym)
+            if atr is None:
+                print(f"No ATR for {yf_symbol}. Skipping.")
+                continue
+            stop_loss_distance = round(2 * atr, 2)
+            risk_per_share = stop_loss_distance
+            risk_amount = round(0.01 * total_equity, 2)
+            qty = risk_amount / risk_per_share if risk_per_share > 0 else 0
+            total_cost_for_qty = qty * current_price
+
+            # Cap by available cash and portfolio exposure
+            cash = acc['buying_power_cash']
+            print(f"Cash available for {yf_symbol}: ${cash:.2f}")
+            total_cost_for_qty = round(min(total_cost_for_qty, cash - 1.00, max_new_exposure), 2)
+            if total_cost_for_qty < 1.00:
+                print(f"Insufficient risk-adjusted allocation for {yf_symbol}.")
+                continue
+            qty = round(total_cost_for_qty / current_price, 4)
+
+            # Estimate slippage
+            estimated_slippage = round(total_cost_for_qty * 0.001, 2)
+            total_cost_for_qty = round(total_cost_for_qty - estimated_slippage, 2)
+            qty = round(total_cost_for_qty / current_price, 4)
+            print(f"{yf_symbol}: Adjusted for slippage (0.1%): Notional = ${total_cost_for_qty:.2f}, Qty = {qty:.4f}")
+
+        # Unified cash checks
+        cash = acc['buying_power_cash']
+        if total_cost_for_qty < 1.00:
+            print(f"Order amount for {yf_symbol} is ${total_cost_for_qty:.2f}, below minimum $1.00")
+            logging.info(f"{current_time_str} Did not buy {yf_symbol} due to order amount below $1.00")
+            continue
+        if cash < total_cost_for_qty + 1.00:
+            print(
+                f"Insufficient cash for {yf_symbol}. Available: ${cash:.2f}, Required: ${total_cost_for_qty:.2f} + $1.00 minimum")
+            logging.info(f"{current_time_str} Did not buy {yf_symbol} due to insufficient cash")
+            continue
+
+        if buy_conditions_met:
+            api_symbols = sym
+            reason = f"bullish reversal ({', '.join(detected_patterns)}), {specific_reason}"
+            print(f"Submitting buy order for {api_symbols}...")
+            try:
+                # Ensure notional value is rounded to 2 decimal places
+                total_cost_for_qty = round(total_cost_for_qty, 2)
+                order = client_place_order(api_symbols, qty, "buy")
+                if order:
+                    print(
+                        f"{current_time_str}, Submitted buy order for {qty:.4f} shares of {api_symbols} at ${current_price:.2f} (notional: ${total_cost_for_qty:.2f}) due to {reason}")
+                    logging.info(
+                        f"{current_time_str} Submitted buy {qty:.4f} shares of {api_symbols} due to {reason}. RSI Decrease={rsi_decrease}, Volume Decrease={volume_decrease}, Bullish Reversal={bullish_reversal_detected}, Price Decline >= 0.2%={price_decline}")
+
+                    # Assume filled for simplicity, as no order status polling in current setup
+                    filled_qty = qty
+                    filled_price = round(current_price, 2)
+                    actual_cost = round(filled_qty * filled_price, 2)
+                    print(
+                        f"Order filled for {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}, actual cost: ${actual_cost:.2f}")
+                    logging.info(
+                        f"Order filled for {filled_qty:.4f} shares of {api_symbols}, actual cost: ${actual_cost:.2f}")
+
+                    # Skip trailing stop as not implemented for Public.com
+
+                    # Record CSV
+                    with open(CSV_FILENAME, 'a', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+                        writer.writerow({
+                            'Date': current_time_str,
+                            'Buy': 'Buy',
+                            'Sell': '',
+                            'Quantity': filled_qty,
+                            'Symbol': api_symbols,
+                            'Price Per Share': filled_price
+                        })
+
+                    symbols_to_remove.append((api_symbols, filled_price, today_str))
+
+            except Exception as e:
+                print(f"Error submitting buy order for {api_symbols}: {e}")
+                logging.error(f"Error submitting buy order for {api_symbols}: {e}")
+                continue
+
+        else:
+            print(
+                f"{yf_symbol}: Conditions not met for any detected patterns. Bullish Reversal = {bullish_reversal_detected}, Volume Decrease = {volume_decrease}, RSI Decrease = {rsi_decrease}, Price Decline >= 0.2% = {price_decline}, Price Stable = {price_stable}")
+            logging.info(
+                f"{current_time_str} Did not buy {yf_symbol} due to Bullish Reversal = {bullish_reversal_detected}, Volume Decrease = {volume_decrease}, RSI Decrease = {rsi_decrease}, Price Decline >= 0.2% = {price_decline}, Price Stable = {price_stable}")
+
+        time.sleep(0.8)
+
+    try:
+        session = SessionLocal()
+        print("Updating database with buy transactions...")
+        for sym, price, date in symbols_to_remove:
+            # Record in DB
+            trade = TradeHistory(
+                symbols=sym,
+                action="buy",
+                quantity=filled_qty,
+                price=price,
+                date=date
+            )
+            session.add(trade)
+            db_position = Position(
+                symbols=sym,
+                quantity=filled_qty,
+                avg_price=price,
+                purchase_date=date
+            )
+            session.add(db_position)
+        session.commit()
+        print("Database updated successfully.")
+        session.close()
+    except SQLAlchemyError as e:
+        if session:
+            session.rollback()
+        logging.error(f"DB error saving trade for {sym} on BROKERAGE account {account_id}: {e}")
 
 def sell_stocks():
     account = client_get_account()
@@ -433,7 +952,7 @@ def sell_stocks():
         if cur_price >= 1.005 * p['avg_price']:
             order = client_place_order(p['symbol'], p['qty'], "sell")
             if order:
-                logging.info(f"Selling {p['qty']} of {p['symbol']} at {cur_price} for BROKERAGE account {account_id}")
+                logging.info(f"Selling {p['qty']} of {p['symbol']} at ${cur_price:.2f} for BROKERAGE account {account_id}")
                 with open(CSV_FILENAME, 'a', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
                     writer.writerow({
@@ -442,7 +961,7 @@ def sell_stocks():
                         'Sell': 'Sell',
                         'Quantity': p['qty'],
                         'Symbol': p['symbol'],
-                        'Price Per Share': round(cur_price, 2)
+                        'Price Per Share': cur_price
                     })
 
                 # Update DB
@@ -516,10 +1035,9 @@ def trading_robot(interval=30):
                 print("  No positions held.")
             for p in positions:
                 cur_price = client_get_quote(p['symbol']) or 0
-                price_color = "\033[92m" if cur_price > p['avg_price'] else "\033[91m" if cur_price < p['avg_price'] else "\033[0m"
-                reset = "\033[0m"
-                pct = (cur_price - p['avg_price']) / p['avg_price'] * 100 if p['avg_price'] else 0
-                print(f"  {p['symbol']} | Qty: {p['qty']} | Avg Price: ${p['avg_price']:.2f} | Current Price: {price_color}${cur_price:.2f}{reset} | Change: {price_color}{pct:.2f}%{reset}")
+                price_color = GREEN if cur_price > p['avg_price'] else RED if cur_price < p['avg_price'] else RESET
+                pct = round((cur_price - p['avg_price']) / p['avg_price'] * 100, 2) if p['avg_price'] else 0
+                print(f"  {p['symbol']} | Qty: {p['qty']:.4f} | Avg Price: ${p['avg_price']:.2f} | Current Price: {price_color}${cur_price:.2f}{RESET} | Change: {price_color}{pct:.2f}%{RESET}")
 
             print("Buy Analysis:")
             if not can_trade:
@@ -532,10 +1050,19 @@ def trading_robot(interval=30):
             # Then buy
             buy_stocks(symbols)
 
+            # Print database (trade history and positions)
+            if PRINT_DB_TRADES:
+                print("\n------------------------------------------------------------------------------------")
+                print_database()
+                print("------------------------------------------------------------------------------------\n")
+
+            # Print waiting message
+            print(f"Waiting 15 seconds to continue...")
             time.sleep(interval)
         except Exception as e:
             logging.error(f"Main loop error: {e}")
-            time.sleep(30)
+            time.sleep(15)
 
 if __name__ == "__main__":
-    trading_robot(interval=30)
+    trading_robot(interval=15)
+    
