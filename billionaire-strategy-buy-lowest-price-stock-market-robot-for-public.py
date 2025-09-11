@@ -591,8 +591,8 @@ def buy_stocks(symbols):
             score += 1
 
         if score < 3:
-            print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
-            logging.info(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
+            print(f"{yf_symbol}: Score too low ({score} < 4). Skipping.")
+            logging.info(f"{yf_symbol}: Score too low ({score} < 4). Skipping.")
             continue
 
         # Calculate volume decrease
