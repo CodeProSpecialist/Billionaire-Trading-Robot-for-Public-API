@@ -16,15 +16,13 @@ from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 
 # Global variables
-# Note: Ensure YOUR_SECRET_KEY is exported in your .bashrc file, e.g.,
-# export YOUR_SECRET_KEY="your-api-key-here"
 YOUR_SECRET_KEY = "YOUR_SECRET_KEY"
 secret = None
 access_token = None
 account_id = None
 last_token_fetch_time = None
 BASE_URL = "https://api.public.com/userapigateway"
-HEADERS = None  # Will be set after fetching access token
+HEADERS = None
 
 # --- Flags ---
 FRACTIONAL_BUY_ORDERS = True
@@ -52,7 +50,7 @@ class TradeHistory(Base):
     __tablename__ = 'trade_history'
     id = Column(Integer, primary_key=True)
     symbols = Column(String)
-    action = Column(String)  # buy or sell
+    action = Column(String)
     quantity = Column(Float)
     price = Column(Float)
     date = Column(String)
@@ -87,12 +85,41 @@ def load_symbols_from_file(file_path=SYMBOLS_FILE):
 
 nyse_cal = mcal.get_calendar('NYSE')
 
+def get_last_5_business_days():
+    """Get the last 5 NYSE business days as YYYY-MM-DD strings."""
+    today = datetime.now(eastern).date()
+    schedule = nyse_cal.schedule(start_date=today - timedelta(days=10), end_date=today)
+    business_days = schedule.index[-5:].strftime("%Y-%m-%d").tolist()
+    return business_days
+
+def count_day_trades():
+    """Count day trades in the last 5 business days."""
+    session = SessionLocal()
+    try:
+        business_days = get_last_5_business_days()
+        trades = session.query(TradeHistory).filter(TradeHistory.date.in_(business_days)).all()
+        day_trades = 0
+        trades_by_symbol_date = {}
+        for trade in trades:
+            key = (trade.symbols, trade.date)
+            if key not in trades_by_symbol_date:
+                trades_by_symbol_date[key] = []
+            trades_by_symbol_date[key].append(trade.action)
+        for key, actions in trades_by_symbol_date.items():
+            if "buy" in actions and "sell" in actions:
+                day_trades += 1
+        return day_trades
+    except Exception as e:
+        logging.error(f"Error counting day trades: {e}")
+        return 0
+    finally:
+        session.close()
+
 def robot_can_run():
     """
     Determines if trading actions (buy/sell) are allowed:
     - Fractional buys only during regular market hours
     - Whole shares allowed in pre-market or post-market
-    Returns: (can_trade: bool, message: str)
     """
     now = datetime.now(eastern)
     schedule = nyse_cal.schedule(start_date=now.date(), end_date=now.date())
@@ -101,8 +128,8 @@ def robot_can_run():
 
     market_open = schedule.iloc[0]['market_open'].tz_convert(eastern)
     market_close = schedule.iloc[0]['market_close'].tz_convert(eastern)
-    pre_market_open = market_open - timedelta(hours=2)  # 7:00 AM ET
-    post_market_close = market_close + timedelta(hours=4) # 8:00 PM ET
+    pre_market_open = market_open - timedelta(hours=2)
+    post_market_close = market_close + timedelta(hours=4)
 
     if market_open <= now <= market_close:
         return True, "Market open - trading allowed for all shares"
@@ -112,36 +139,36 @@ def robot_can_run():
         return False, f"Outside extended hours ({pre_market_open.strftime('%I:%M %p')} - {post_market_close.strftime('%I:%M %p')})"
 
 def fetch_access_token_and_account_id():
-    """Fetch a new access token and BROKERAGE account ID using the core Public.com API code."""
+    """Fetch a new access token and BROKERAGE account ID."""
     global secret, access_token, account_id, HEADERS, last_token_fetch_time
     try:
-        # Core API code (must match exactly)
         secret = os.getenv("YOUR_SECRET_KEY")
+        if not secret:
+            raise ValueError("YOUR_SECRET_KEY environment variable not set")
 
         # Authorization
         url = "https://api.public.com/userapiauthservice/personal/access-tokens"
         headers = {
             "Content-Type": "application/json"
         }
-
         request_body = {
             "validityInMinutes": 1440,
             "secret": secret
         }
-
-        response = requests.post(url, headers=headers, json=request_body)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        access_token = response.json()["accessToken"]
+        response = requests.post(url, headers=headers, json=request_body, timeout=10)
+        response.raise_for_status()
+        access_token = response.json().get("accessToken")
+        if not access_token:
+            raise ValueError("No access token returned")
 
         # Account Information
-        url = f"{BASE_URL}/v1/accounts"
+        url = f"{BASE_URL}/trading/account"
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
         data = response.json()
 
         # Filter for BROKERAGE account
@@ -150,24 +177,29 @@ def fetch_access_token_and_account_id():
             raise ValueError("No BROKERAGE account found")
         account_id = brokerage_account["accountId"]
 
-        # Update HEADERS with new access token
+        # Update HEADERS
         HEADERS = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
         last_token_fetch_time = datetime.now()
-        logging.info(f"Successfully fetched new access token and BROKERAGE account ID: {account_id}")
+        logging.info(f"Successfully fetched access token and BROKERAGE account ID: {account_id}")
         return True
+    except HTTPError as e:
+        logging.error(f"HTTP error fetching token or account ID: {e}, Response: {response.text if 'response' in locals() else 'No response'}")
+        time.sleep(30)
+        return False
+    except (ConnectionError, Timeout) as e:
+        logging.error(f"Network error fetching token or account ID: {e}")
+        time.sleep(30)
+        return False
     except Exception as e:
-        logging.error(f"Failed to fetch access token or BROKERAGE account ID: {str(e)}")
-        logging.info("Retrying token fetch in 2 minutes...")
-        time.sleep(120)  # Wait 2 minutes before retrying
+        logging.error(f"Unexpected error fetching token or account ID: {e}")
+        time.sleep(30)
         return False
 
 def client_get_account():
-    """
-    Fetch account details for BROKERAGE account from Public.com API.
-    """
+    """Fetch account details for BROKERAGE account."""
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId available")
@@ -176,7 +208,7 @@ def client_get_account():
         resp = requests.get(f"{BASE_URL}/v1/accounts/{account_id}", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         account = resp.json()
-        print(account)  # Core API code requirement
+        print(account)
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
@@ -191,9 +223,7 @@ def client_get_account():
         return {'equity': 0.0, 'cash': 0.0, 'accountId': account_id, 'raw': {}}
 
 def client_list_positions():
-    """
-    Fetch current positions for BROKERAGE account from Public.com API using portfolio/v2 endpoint.
-    """
+    """Fetch current positions for BROKERAGE account."""
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId available")
@@ -209,7 +239,6 @@ def client_list_positions():
             sym = p.get('instrument', {}).get('symbol')
             qty = float(p.get('quantity', 0))
             avg = float(p.get('costBasis', {}).get('unitCost', 0))
-            # Convert openedAt to YYYY-MM-DD in Eastern Time
             opened_at = p.get('openedAt', datetime.now(eastern).strftime("%Y-%m-%d"))
             try:
                 date_str = datetime.fromisoformat(opened_at.replace('Z', '+00:00')).astimezone(eastern).strftime("%Y-%m-%d")
@@ -226,9 +255,7 @@ def client_list_positions():
         return []
 
 def client_place_order(symbol, qty, side, price=None):
-    """
-    Place a buy or sell order for BROKERAGE account via Public.com API.
-    """
+    """Place a buy or sell order for BROKERAGE account."""
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId available")
@@ -238,14 +265,15 @@ def client_place_order(symbol, qty, side, price=None):
         payload = {
             "symbol": symbol,
             "quantity": qty,
-            "side": side,  # 'buy' or 'sell'
+            "side": side,
             "type": order_type,
-            "time_in_force": "day"
+            "time_in_force": "day",
+            "accountId": account_id
         }
         if price:
             payload["price"] = price
 
-        resp = requests.post(f"{BASE_URL}/v1/orders/{account_id}", json=payload, headers=HEADERS, timeout=10)
+        resp = requests.post(f"{BASE_URL}/v1/orders", json=payload, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         order = resp.json()
         logging.info(f"Order placed for BROKERAGE account {account_id}: {side} {qty} of {symbol} at {order_type} price")
@@ -258,9 +286,7 @@ def client_place_order(symbol, qty, side, price=None):
         return None
 
 def client_get_quote(symbol):
-    """
-    Fetch latest quote using yfinance.
-    """
+    """Fetch latest quote using yfinance."""
     try:
         df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
         return float(df['Close'].iloc[-1])
@@ -276,7 +302,7 @@ def buy_stocks(symbols):
 
     for sym in symbols:
         current_price = client_get_quote(sym)
-        if current_price is None or cash < 3.0:  # leave $2 buffer
+        if current_price is None or cash < 3.0:
             print(f"  {sym}: Skipped (No price data or insufficient cash)")
             continue
 
@@ -327,7 +353,7 @@ def buy_stocks(symbols):
         reset = "\033[0m"
         print(f"  {sym}: Score={score}, Price={price_color}${close[-1]:.2f}{reset} ({price_color}{price_change_pct:.2f}%{reset})")
 
-        if score < 4:  # Threshold 4
+        if score < 4:
             continue
 
         # Determine buy quantity
@@ -377,9 +403,15 @@ def sell_stocks():
     account = client_get_account()
     positions = client_list_positions()
     today_str = datetime.now(eastern).strftime("%Y-%m-%d")
+    day_trades = count_day_trades()
 
     for p in positions:
-        # Only sell if bought before today
+        # Skip if bought today and day trades >= 3
+        if p['purchase_date'] == today_str and day_trades >= 3:
+            logging.info(f"Skipping sell of {p['symbol']} (bought today, day trades={day_trades})")
+            print(f"  {p['symbol']}: Skipped sell (bought today, day trades={day_trades})")
+            continue
+        # Skip if bought today
         if p['purchase_date'] == today_str:
             continue
         cur_price = client_get_quote(p['symbol'])
@@ -421,7 +453,7 @@ def sell_stocks():
                 finally:
                     session.close()
 
-def trading_robot(interval=120):
+def trading_robot(interval=30):
     global secret, access_token, account_id, HEADERS, last_token_fetch_time
     symbols = load_symbols_from_file()
     if not symbols:
@@ -430,14 +462,14 @@ def trading_robot(interval=120):
 
     while True:
         try:
-            # Fetch new access token and BROKERAGE account ID if none exist or 24 hours have elapsed
+            # Fetch new access token and BROKERAGE account ID
             current_time = datetime.now()
             if (access_token is None or 
                 last_token_fetch_time is None or 
                 (current_time - last_token_fetch_time).total_seconds() >= 86400):
                 if not fetch_access_token_and_account_id():
                     logging.error("Failed to fetch access token or BROKERAGE account ID, retrying in main loop")
-                    time.sleep(120)
+                    time.sleep(30)
                     continue
 
             # Print today's date
@@ -462,6 +494,10 @@ def trading_robot(interval=120):
             acc = client_get_account()
             print(f"Equity: ${acc['equity']:.2f} | Cash: ${acc['cash']:.2f}")
 
+            # Print day trades
+            day_trades = count_day_trades()
+            print(f"Day Trades (Last 5 Business Days): {day_trades}")
+
             # Print owned positions with current price and % change
             positions = client_list_positions()
             print("Owned Positions:")
@@ -477,7 +513,7 @@ def trading_robot(interval=120):
             print("Buy Analysis:")
             if not can_trade:
                 print("  Trading not allowed, skipping buy analysis.")
-                time.sleep(300)
+                time.sleep(30)
                 continue
 
             # Sell first
@@ -488,7 +524,7 @@ def trading_robot(interval=120):
             time.sleep(interval)
         except Exception as e:
             logging.error(f"Main loop error: {e}")
-            time.sleep(120)
+            time.sleep(30)
 
 if __name__ == "__main__":
-    trading_robot(interval=120)
+    trading_robot(interval=30)
