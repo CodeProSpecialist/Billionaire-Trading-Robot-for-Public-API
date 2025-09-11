@@ -177,10 +177,6 @@ def client_get_account():
         resp.raise_for_status()
         account = resp.json()
         print(account)  # Core API code requirement
-        print(f"Current date and time: {datetime.now(eastern).strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
-        print()  # Empty print statement for spacing
-        next_run = datetime.now(eastern) + timedelta(seconds=120)
-        print(f"Next run time: {next_run.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
         return {
             'equity': float(account.get('equity', 0)),
             'cash': float(account.get('cash', 0)),
@@ -281,16 +277,17 @@ def buy_stocks(symbols):
     for sym in symbols:
         current_price = client_get_quote(sym)
         if current_price is None or cash < 3.0:  # leave $2 buffer
+            print(f"  {sym}: Skipped (No price data or insufficient cash)")
             continue
 
-        # --- Score calculation (Updated) ---
+        # --- Score calculation ---
         score = 0
         df = yf.Ticker(sym.replace('.', '-')).history(period="20d")
         close = df['Close'].values
         open_ = df['Open'].values
         high = df['High'].values
         low = df['Low'].values
-        volume = df['Volume'].values  # Added for volume check
+        volume = df['Volume'].values
 
         # Candlestick bullish reversal patterns
         bullish_patterns = [
@@ -304,7 +301,7 @@ def buy_stocks(symbols):
                 score += 2
                 break
 
-        # RSI oversold bounce (improved from original RSI < 50)
+        # RSI oversold bounce
         rsi = talib.RSI(close)
         if len(rsi) >= 2 and rsi[-2] < 30 and rsi[-1] > rsi[-2]:
             score += 1
@@ -313,18 +310,24 @@ def buy_stocks(symbols):
         if close[-1] <= close[-2] * 0.997:
             score += 2
 
-        # NEW: Low volume (below 10-day SMA)
+        # Low volume (below 10-day SMA)
         if len(volume) >= 10:
             avg_vol = talib.SMA(volume, timeperiod=10)[-1]
             if volume[-1] < avg_vol:
                 score += 1
 
-        # NEW: Favorable MACD (MACD > signal)
+        # Favorable MACD (MACD > signal)
         macd, signal, _ = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
         if len(macd) >= 1 and macd[-1] > signal[-1]:
             score += 1
 
-        if score < 4:  # Threshold set to 4
+        # Calculate % change from previous close
+        price_change_pct = ((close[-1] - close[-2]) / close[-2] * 100) if len(close) >= 2 else 0
+        price_color = "\033[92m" if price_change_pct > 0 else "\033[91m" if price_change_pct < 0 else "\033[0m"
+        reset = "\033[0m"
+        print(f"  {sym}: Score={score}, Price={price_color}${close[-1]:.2f}{reset} ({price_color}{price_change_pct:.2f}%{reset})")
+
+        if score < 4:  # Threshold 4
             continue
 
         # Determine buy quantity
@@ -437,9 +440,13 @@ def trading_robot(interval=120):
                     time.sleep(120)
                     continue
 
-            # Print current date and time in Eastern Time
+            # Print today's date
+            today_str = datetime.now(eastern).strftime("%Y-%m-%d")
+            print(f"Today's Date: {today_str}")
+
+            # Print current time
             current_time = datetime.now(eastern)
-            print(f"Current Time: {current_time.strftime('%Y-%m-%d %I:%M:%S %p %Z')}")
+            print(f"Current Time: {current_time.strftime('%I:%M:%S %p %Z')}")
 
             # Check if time is past 8:00 PM EDT
             stop_time = current_time.replace(hour=20, minute=0, second=0, microsecond=0)
@@ -455,19 +462,21 @@ def trading_robot(interval=120):
             acc = client_get_account()
             print(f"Equity: ${acc['equity']:.2f} | Cash: ${acc['cash']:.2f}")
 
-            # Print owned positions with color based on current price vs avg price
+            # Print owned positions with current price and % change
             positions = client_list_positions()
             print("Owned Positions:")
             if not positions:
                 print("  No positions held.")
             for p in positions:
                 cur_price = client_get_quote(p['symbol']) or 0
-                price_color = "\033[92m" if cur_price > p['avg_price'] else "\033[91m"
+                price_color = "\033[92m" if cur_price > p['avg_price'] else "\033[91m" if cur_price < p['avg_price'] else "\033[0m"
                 reset = "\033[0m"
                 pct = (cur_price - p['avg_price']) / p['avg_price'] * 100 if p['avg_price'] else 0
-                print(f"  {p['symbol']} | Qty: {p['qty']} | Avg Price: ${p['avg_price']:.2f} | Current Price: {price_color}${cur_price:.2f}{reset} | Change: {pct:.2f}%")
+                print(f"  {p['symbol']} | Qty: {p['qty']} | Avg Price: ${p['avg_price']:.2f} | Current Price: {price_color}${cur_price:.2f}{reset} | Change: {price_color}{pct:.2f}%{reset}")
 
+            print("Buy Analysis:")
             if not can_trade:
+                print("  Trading not allowed, skipping buy analysis.")
                 time.sleep(300)
                 continue
 
