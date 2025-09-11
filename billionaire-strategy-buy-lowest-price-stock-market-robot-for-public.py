@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 import os
 import time
@@ -318,18 +319,29 @@ def client_place_order(symbol, qty, side, price=None):
 def client_get_quote(symbol):
     """Fetch latest quote using yfinance, limited to 60 calls per minute."""
     try:
-        df = yf.Ticker(symbol.replace('.', '-')).history(period="1d", interval="1m")
-        return round(float(df['Close'].iloc[-1]), 2)
+        yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
+        ticker = yf.Ticker(yf_symbol)
+        data = ticker.history(period="1d", interval="1m", prepost=True)
+        if data.empty:
+            logging.error(f"No price data for {yf_symbol} from yfinance")
+            return None
+        price = round(float(data['Close'].iloc[-1]), 2)
+        logging.info(f"Fetched price ${price:.2f} for {yf_symbol} from yfinance")
+        return price
     except Exception as e:
         logging.error(f"Quote fetch error for {symbol}: {e}")
         return None
 
-# Ported helper functions from Alpaca script
 def calculate_technical_indicators(symbols, lookback_days=90):
+    """Calculate technical indicators using yfinance data."""
     print(f"Calculating technical indicators for {symbols} over {lookback_days} days...")
     yf_symbol = symbols.replace('.', '-')  # Adjust for yfinance compatibility
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period=f'{lookback_days}d')
+    if historical_data.empty:
+        print(f"No historical data for {yf_symbol} from yfinance")
+        logging.error(f"No historical data for {yf_symbol} from yfinance")
+        return historical_data
     short_window = 12
     long_window = 26
     signal_window = 9
@@ -344,34 +356,34 @@ def calculate_technical_indicators(symbols, lookback_days=90):
     return historical_data
 
 def get_average_true_range(symbols):
-    """
-    Calculate the Average True Range (ATR) for a given stock symbol.
-    """
+    """Calculate the Average True Range (ATR) using yfinance."""
     print(f"Calculating ATR for {symbols}...")
-
-    def _fetch_atr(symbols):
-        yf_symbol = symbols.replace('.', '-')  # Adjust for yfinance compatibility
-        ticker = yf.Ticker(yf_symbol)
-        data = ticker.history(period='30d')
-        try:
-            atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
-            atr_value = round(atr[-1], 2)
-            print(f"ATR for {yf_symbol}: {atr_value:.2f}")
-            return atr_value
-        except Exception as e:
-            logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
-            print(f"Error calculating ATR for {yf_symbol}: {e}")
-            return None
-
-    return _fetch_atr(symbols)
+    yf_symbol = symbols.replace('.', '-')  # Adjust for yfinance compatibility
+    ticker = yf.Ticker(yf_symbol)
+    data = ticker.history(period='30d')
+    if data.empty:
+        print(f"No data for {yf_symbol} from yfinance for ATR calculation")
+        logging.error(f"No data for {yf_symbol} from yfinance for ATR calculation")
+        return None
+    try:
+        atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
+        atr_value = round(atr[-1], 2)
+        print(f"ATR for {yf_symbol}: {atr_value:.2f}")
+        return atr_value
+    except Exception as e:
+        logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
+        print(f"Error calculating ATR for {yf_symbol}: {e}")
+        return None
 
 def is_in_uptrend(symbols_to_buy):
+    """Check if stock is in uptrend using yfinance (above 200-day SMA)."""
     print(f"Checking if {symbols_to_buy} is in uptrend (above 200-day SMA)...")
     yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='200d')
     if historical_data.empty or len(historical_data) < 200:
-        print(f"Insufficient data for 200-day SMA for {yf_symbol}. Assuming not in uptrend.")
+        print(f"Insufficient data for 200-day SMA for {yf_symbol} from yfinance")
+        logging.error(f"Insufficient data for 200-day SMA for {yf_symbol} from yfinance")
         return False
     sma_200 = round(talib.SMA(historical_data['Close'].values, timeperiod=200)[-1], 2)
     current_price = client_get_quote(symbols_to_buy)
@@ -381,12 +393,14 @@ def is_in_uptrend(symbols_to_buy):
     return in_uptrend
 
 def get_daily_rsi(symbols_to_buy):
+    """Calculate daily RSI using yfinance."""
     print(f"Calculating daily RSI for {symbols_to_buy}...")
     yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='30d', interval='1d')
     if historical_data.empty:
-        print(f"No daily data for {yf_symbol}. RSI calculation failed.")
+        print(f"No daily data for {yf_symbol} from yfinance")
+        logging.error(f"No daily data for {yf_symbol} from yfinance")
         return None
     rsi = talib.RSI(historical_data['Close'], timeperiod=14)[-1]
     rsi_value = round(rsi, 2) if not np.isnan(rsi) else None
@@ -394,6 +408,7 @@ def get_daily_rsi(symbols_to_buy):
     return rsi_value
 
 def get_last_price_within_past_5_minutes(symbols_to_buy_list):
+    """Fetch last price within past 5 minutes using yfinance."""
     print("Fetching last prices within past 5 minutes for symbols...")
     results = {}
     eastern = pytz.timezone('US/Eastern')
@@ -407,15 +422,17 @@ def get_last_price_within_past_5_minutes(symbols_to_buy_list):
             yf_symbol = symbols_to_buy.replace('.', '-')  # Adjust for yfinance compatibility
             data = yf.download(yf_symbol, start=start_time, end=end_time, interval='1m', prepost=True, auto_adjust=False)
             if not data.empty:
-                last_price = round(float(data['Close'].iloc[-1].item()), 2)
+                last_price = round(float(data['Close'].iloc[-1]), 2)
                 results[symbols_to_buy] = last_price
                 print(f"Last price for {yf_symbol} within 5 minutes: ${last_price:.2f}")
+                logging.info(f"Last price for {yf_symbol} within 5 minutes: ${last_price:.2f}")
             else:
                 results[symbols_to_buy] = None
-                print(f"No price data found for {yf_symbol} within past 5 minutes.")
+                print(f"No price data found for {yf_symbol} within past 5 minutes from yfinance")
+                logging.error(f"No price data found for {yf_symbol} within past 5 minutes from yfinance")
         except Exception as e:
-            print(f"Error occurred while fetching data for {yf_symbol}: {e}")
-            logging.error(f"Error occurred while fetching data for {yf_symbol}: {e}")
+            print(f"Error fetching data for {yf_symbol} from yfinance: {e}")
+            logging.error(f"Error fetching data for {yf_symbol} from yfinance: {e}")
             results[symbols_to_buy] = None
 
     return results
@@ -445,7 +462,7 @@ def print_database():
             print("No positions held.")
         for record in positions:
             current_price = client_get_quote(record.symbols)
-            percentage_change = ((current_price - record.avg_price) / record.avg_price * 100) if current_price and record.avg_price else 0
+            percentage_change = round(((current_price - record.avg_price) / record.avg_price * 100), 2) if current_price and record.avg_price else 0
             color = GREEN if percentage_change >= 0 else RED
             print(f"{record.symbols} | {record.quantity:.4f} | ${record.avg_price:.2f} | {record.purchase_date} | {color}${current_price:.2f}{RESET} | {color}{percentage_change:.2f}%{RESET}")
         print("\n")
@@ -494,13 +511,13 @@ def buy_stocks(symbols):
     for sym in symbols:
         current_price = client_get_quote(sym)
         if current_price is None:
-            print(f"No valid price data for {sym}. Skipping.")
-            logging.info(f"No valid price data for {sym}.")
+            print(f"No valid price data for {sym} from yfinance. Skipping.")
+            logging.info(f"No valid price data for {sym} from yfinance.")
             continue
         historical_data = calculate_technical_indicators(sym, lookback_days=5)
         if historical_data.empty:
-            print(f"No historical data for {sym}. Skipping.")
-            logging.info(f"No historical data for {sym}.")
+            print(f"No historical data for {sym} from yfinance. Skipping.")
+            logging.info(f"No historical data for {sym} from yfinance.")
             continue
         valid_symbols.append(sym)
     print(f"Valid symbols to process: {valid_symbols}")
@@ -522,8 +539,8 @@ def buy_stocks(symbols):
         # Fetch current data
         current_price = client_get_quote(sym)
         if current_price is None:
-            print(f"No valid price data for {sym}.")
-            logging.info(f"No valid price data for {sym}.")
+            print(f"No valid price data for {sym} from yfinance.")
+            logging.info(f"No valid price data for {sym} from yfinance.")
             continue
 
         # Update price history for the symbol at specified intervals
@@ -543,8 +560,8 @@ def buy_stocks(symbols):
         print(f"Fetching 20-day historical data for {yf_symbol}...")
         df = yf.Ticker(yf_symbol).history(period="20d")
         if df.empty or len(df) < 3:
-            print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
-            logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}).")
+            print(f"Insufficient historical data for {sym} from yfinance (rows: {len(df)}). Skipping.")
+            logging.info(f"Insufficient historical data for {sym} from yfinance (rows: {len(df)}).")
             continue
 
         # --- Score calculation ---
@@ -636,12 +653,13 @@ def buy_stocks(symbols):
         last_price = last_prices.get(sym)
         if last_price is None:
             try:
-                last_price = round(float(df['Close'].iloc[-1].item()), 2)
-                print(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: ${last_price:.2f}")
-                logging.info(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: ${last_price:.2f}")
+                df_last = yf.Ticker(yf_symbol).history(period="1d")
+                last_price = round(float(df_last['Close'].iloc[-1]), 2)
+                print(f"No price found for {yf_symbol} in past 5 minutes from yfinance. Using last closing price: ${last_price:.2f}")
+                logging.info(f"No price found for {yf_symbol} in past 5 minutes from yfinance. Using last closing price: ${last_price:.2f}")
             except Exception as e:
-                print(f"Error fetching last closing price for {yf_symbol}: {e}")
-                logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
+                print(f"Error fetching last closing price for {yf_symbol} from yfinance: {e}")
+                logging.error(f"Error fetching last closing price for {yf_symbol} from yfinance: {e}")
                 continue
 
         price_decline_threshold = round(last_price * (1 - 0.002), 2)
@@ -813,7 +831,7 @@ def buy_stocks(symbols):
             print(f"Calculating position size for {sym}...")
             atr = get_average_true_range(sym)
             if atr is None:
-                print(f"No ATR for {yf_symbol}. Skipping.")
+                print(f"No ATR for {yf_symbol} from yfinance. Skipping.")
                 continue
             stop_loss_distance = round(2 * atr, 2)
             risk_per_share = stop_loss_distance
@@ -945,6 +963,8 @@ def sell_stocks():
             continue
         cur_price = client_get_quote(p['symbol'])
         if cur_price is None:
+            print(f"No price data for {p['symbol']} from yfinance. Skipping sell.")
+            logging.info(f"No price data for {p['symbol']} from yfinance. Skipping sell.")
             continue
 
         # Sell if profit >= 0.5%
