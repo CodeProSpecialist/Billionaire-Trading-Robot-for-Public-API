@@ -334,26 +334,91 @@ def get_daily_rsi(symbol):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def calculate_technical_indicators(symbols, lookback_days=90):
+def calculate_technical_indicators(symbols, lookback_days=200):
     print(f"Calculating technical indicators for {symbols} using yfinance...")
     yf_symbol = symbols.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
-    historical_data = stock_data.history(period=f'{lookback_days}d')
-    if historical_data.empty:
-        print(f"No historical data for {yf_symbol}.")
+    
+    # Fetch 200 days of historical data
+    historical_data = stock_data.history(period='200d', interval='1d')
+    
+    # Check if data is sufficient
+    if historical_data.empty or len(historical_data) < 35:  # Minimum for MACD (26 + 9)
+        print(f"Insufficient historical data for {yf_symbol} (rows: {len(historical_data)}).")
+        logging.error(f"Insufficient historical data for {yf_symbol} (rows: {len(historical_data)}).")
         return historical_data
+    
+    # Ensure Close prices are clean (no NaN)
+    historical_data = historical_data.dropna(subset=['Close'])
+    
+    if len(historical_data) < 35:
+        print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(historical_data)}).")
+        logging.error(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(historical_data)}).")
+        return historical_data
+    
+    # Calculate MACD
     short_window = 12
     long_window = 26
     signal_window = 9
-    historical_data['macd'], historical_data['signal'], _ = talib.MACD(historical_data['Close'],
-                                                                       fastperiod=short_window,
-                                                                       slowperiod=long_window,
-                                                                       signalperiod=signal_window)
-    historical_data['rsi'] = talib.RSI(historical_data['Close'], timeperiod=14)
+    try:
+        macd, signal, _ = talib.MACD(historical_data['Close'].values,
+                                     fastperiod=short_window,
+                                     slowperiod=long_window,
+                                     signalperiod=signal_window)
+        historical_data['macd'] = macd
+        historical_data['signal'] = signal
+    except Exception as e:
+        print(f"Error calculating MACD for {yf_symbol}: {e}")
+        logging.error(f"Error calculating MACD for {yf_symbol}: {e}")
+        historical_data['macd'] = np.nan
+        historical_data['signal'] = np.nan
+    
+    # Calculate RSI
+    try:
+        rsi = talib.RSI(historical_data['Close'].values, timeperiod=14)
+        historical_data['rsi'] = rsi
+    except Exception as e:
+        print(f"Error calculating RSI for {yf_symbol}: {e}")
+        logging.error(f"Error calculating RSI for {yf_symbol}: {e}")
+        historical_data['rsi'] = np.nan
+    
     historical_data['volume'] = historical_data['Volume']
     print(f"Technical indicators calculated for {yf_symbol}.")
     print_technical_indicators(symbols, historical_data)
     return historical_data
+
+def print_technical_indicators(symbols, historical_data):
+    print(f"\nTechnical Indicators for {symbols}:\n")
+    tail_data = historical_data[['Close', 'macd', 'signal', 'rsi', 'volume']].tail()
+    
+    for idx, row in tail_data.iterrows():
+        close_color = GREEN if row['Close'] >= 0 else RED
+        
+        # Handle MACD and Signal
+        macd_value = row['macd']
+        signal_value = row['signal']
+        if np.isnan(macd_value) or np.isnan(signal_value):
+            macd_display = "N/A"
+            signal_display = "N/A"
+            macd_color = YELLOW
+        else:
+            macd_display = f"{macd_value:.4f}"
+            signal_display = f"{signal_value:.4f}"
+            macd_color = GREEN if macd_value >= signal_value else RED
+        
+        # Handle RSI
+        rsi_value = row['rsi']
+        if np.isnan(rsi_value):
+            rsi_display = "N/A"
+            rsi_color = YELLOW
+        else:
+            rsi_display = f"{rsi_value:.2f}"
+            rsi_color = GREEN if rsi_value >= 50 else RED
+        
+        print(f"Time: {idx} | Close: {close_color}${row['Close']:.2f}{RESET} | "
+              f"MACD: {macd_color}{macd_display}{RESET} (Signal: {signal_display}) | "
+              f"RSI: {rsi_color}{rsi_display}{RESET} | Volume: {row['volume']:.0f}")
+    print("")
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -370,16 +435,6 @@ def calculate_rsi(symbols, period=14, interval='5m'):
     rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED
     print(f"RSI for {yf_symbol}: {rsi_color}{latest_rsi}{RESET}")
     return latest_rsi
-
-def print_technical_indicators(symbols, historical_data):
-    print(f"\nTechnical Indicators for {symbols}:\n")
-    tail_data = historical_data[['Close', 'macd', 'signal', 'rsi', 'volume']].tail()
-    for idx, row in tail_data.iterrows():
-        close_color = GREEN if row['Close'] >= 0 else RED
-        macd_color = GREEN if row['macd'] >= row['signal'] else RED
-        rsi_color = GREEN if row['rsi'] >= 50 else RED
-        print(f"Time: {idx} | Close: {close_color}${row['Close']:.2f}{RESET} | MACD: {macd_color}{row['macd']:.4f}{RESET} (Signal: {row['signal']:.4f}) | RSI: {rsi_color}{row['rsi']:.2f}{RESET} | Volume: {row['volume']:.0f}")
-    print("")
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -665,7 +720,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         if current_price is None:
             print(f"No valid price data for {sym}. Skipping.")
             continue
-        historical_data = calculate_technical_indicators(sym, lookback_days=5)
+        historical_data = calculate_technical_indicators(sym, lookback_days=200)
         if historical_data.empty:
             print(f"No historical data for {sym}. Skipping.")
             continue
@@ -760,7 +815,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
             continue
 
-        # Calculate volume decrease
+# Calculate volume decrease
         print(f"Calculating volume metrics for {sym}...")
         recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
         prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
@@ -1358,105 +1413,90 @@ def main():
     print("Starting trading program...")
     symbols_to_buy = get_symbols_to_buy()
     symbols_to_sell_dict = load_positions_from_database()
+    print(f"Initial symbols to buy: {symbols_to_buy}")
+    print(f"Initial symbols to sell: {symbols_to_sell_dict}")
+
+    if not fetch_access_token_and_account_id():
+        print(f"{RED}Failed to fetch access token or account ID. Exiting.{RESET}")
+        logging.error("Failed to fetch access token or account ID. Exiting.")
+        return
+
+    stop_if_stock_market_is_closed()
+
+    # Print initial database state
+    print_database_tables()
+
+    # Schedule buy and sell checks
+    schedule.every(5).minutes.do(
+        lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
+    ).tag('buy-task')
+    schedule.every(5).minutes.do(
+        lambda: sell_stocks(symbols_to_sell_dict, buy_sell_lock)
+    ).tag('sell-task')
+
+    # Run immediately for testing
+    buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
+    sell_stocks(symbols_to_sell_dict, buy_sell_lock)
+
+    print("Entering main loop. Program will run indefinitely.")
     while True:
         try:
-            if not fetch_access_token_and_account_id():
-                time.sleep(30)
-                continue
-            stop_if_stock_market_is_closed()
-            current_datetime = datetime.now(pytz.timezone('US/Eastern'))
+            current_datetime = datetime.now(eastern)
             current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-            acc = client_get_account()
-            cash_balance = round(acc['buying_power_cash'], 2)
-            cash_color = GREEN if cash_balance >= 0 else RED
-            print("------------------------------------------------------------------------------------")
-            print("\n")
-            print("*****************************************************")
-            print("******** Billionaire Buying Strategy Version ********")
-            print("*****************************************************")
-            print("2025 Edition of the Advanced Stock Market Trading Robot, Version 8 ")
-            print("by https://github.com/CodeProSpecialist")
-            print("------------------------------------------------------------------------------------")
-            print(f" {current_time_str} Cash Balance: {cash_color}${cash_balance}{RESET}")
-            day_trade_count = count_day_trades()
-            print("\n")
-            print(f"Current day trade number: {day_trade_count} out of 3 in 5 business days")
-            print("\n")
-            print("------------------------------------------------------------------------------------")
-            print("\n")
+            print(f"\n{current_time_str} Checking schedule...")
 
-            symbols_to_buy = get_symbols_to_buy()
+            # Check day trade limits
+            day_trades = count_day_trades()
+            print(f"Day trades in last 5 business days: {day_trades}")
+            logging.info(f"{current_time_str} Day trades in last 5 business days: {day_trades}")
+            if day_trades >= 3:
+                print(f"{RED}Day trade limit (3) reached. Skipping buy/sell tasks.{RESET}")
+                logging.warning(f"{current_time_str} Day trade limit (3) reached.")
+                schedule.clear('buy-task')
+                schedule.clear('sell-task')
+            else:
+                # Ensure tasks are scheduled
+                if not any(job.tags == {'buy-task'} for job in schedule.jobs):
+                    schedule.every(5).minutes.do(
+                        lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
+                    ).tag('buy-task')
+                if not any(job.tags == {'sell-task'} for job in schedule.jobs):
+                    schedule.every(5).minutes.do(
+                        lambda: sell_stocks(symbols_to_sell_dict, buy_sell_lock)
+                    ).tag('sell-task')
 
-            if not symbols_to_sell_dict:
-                symbols_to_sell_dict = update_symbols_to_sell_from_api()
+            schedule.run_pending()
 
-            print("Starting buy and sell threads...")
-            buy_thread = threading.Thread(target=buy_stocks, args=(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock))
-            sell_thread = threading.Thread(target=sell_stocks, args=(symbols_to_sell_dict, buy_sell_lock))
+            # Refresh token every 12 hours
+            if last_token_fetch_time and (datetime.now() - last_token_fetch_time).total_seconds() > 12 * 3600:
+                print("Refreshing access token...")
+                if not fetch_access_token_and_account_id():
+                    print(f"{RED}Failed to refresh access token. Continuing anyway.{RESET}")
+                    logging.error("Failed to refresh access token. Continuing.")
 
-            buy_thread.start()
-            sell_thread.start()
-
-            buy_thread.join()
-            sell_thread.join()
-            print("Buy and sell threads completed.")
-
-            if PRINT_SYMBOLS_TO_BUY:
-                print("\n")
-                print("------------------------------------------------------------------------------------")
-                print("\n")
-                print("Symbols to Purchase:")
-                print("\n")
-                for sym in symbols_to_buy:
-                    current_price = client_get_quote(sym)
-                    prev_price = get_previous_price(sym)
-                    price_color = GREEN if current_price > prev_price else RED
-                    print(f"Symbol: {sym} | Current Price: {price_color}${current_price:.2f}{RESET} ")
-                print("\n")
-                print("------------------------------------------------------------------------------------")
-                print("\n")
-
-            if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+            # Print database every 15 minutes
+            if int(current_datetime.strftime("%M")) % 15 == 0:
                 print_database_tables()
 
-            if DEBUG:
-                print("\n")
-                print("------------------------------------------------------------------------------------")
-                print("\n")
-                print("Symbols to Purchase:")
-                print("\n")
-                for sym in symbols_to_buy:
-                    current_price = client_get_quote(sym)
-                    atr_low_price = get_atr_low_price(sym)
-                    prev_price = get_previous_price(sym)
-                    price_color = GREEN if current_price > prev_price else RED
-                    atr_color = GREEN if atr_low_price >= 0 else RED
-                    print(f"Symbol: {sym} | Current Price: {price_color}${current_price:.2f}{RESET} | ATR low buy signal price: {atr_color}${atr_low_price:.2f}{RESET}")
-                print("\n")
-                print("------------------------------------------------------------------------------------")
-                print("\n")
-                print("\nSymbols to Sell:")
-                print("\n")
-                for sym, _ in symbols_to_sell_dict.items():
-                    current_price = client_get_quote(sym)
-                    atr_high_price = get_atr_high_price(sym)
-                    prev_price = get_previous_price(sym)
-                    price_color = GREEN if current_price > prev_price else RED
-                    atr_color = GREEN if atr_high_price >= 0 else RED
-                    print(f"Symbol: {sym} | Current Price: {price_color}${current_price:.2f}{RESET} | ATR high sell signal profit price: {atr_color}${atr_high_price:.2f}{RESET}")
-                print("\n")
+            time.sleep(60)  # Check every minute
 
-            print("Waiting 15 seconds before checking price data again........")
-            time.sleep(15)
-
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}Keyboard interrupt received. Continuing to run indefinitely.{RESET}")
+            logging.info("Keyboard interrupt received. Continuing to run.")
+            time.sleep(60)  # Prevent rapid interrupt spamming
         except Exception as e:
-            logging.error(f"Error encountered in main loop: {e}")
-            print(f"Error encountered in main loop: {e}")
-            time.sleep(120)
+            print(f"{RED}Error in main loop: {e}{RESET}")
+            logging.error(f"Main loop error: {e}")
+            time.sleep(60)  # Wait before retrying
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        logging.error(f"Critical error: {e}")
-        SessionLocal().close()
+        print(f"{RED}Fatal error: {e}{RESET}")
+        logging.error(f"Fatal error: {e}")
+        # Instead of raising, log and restart main loop
+        logging.info("Restarting main loop due to fatal error.")
+        main()
+    
+
