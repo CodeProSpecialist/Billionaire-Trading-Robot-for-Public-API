@@ -1410,62 +1410,95 @@ def count_day_trades():
 
 def main():
     global symbols_to_buy, symbols_to_sell_dict
-    print("Starting trading program...")
+    print("Starting main trading program...")
     symbols_to_buy = get_symbols_to_buy()
     symbols_to_sell_dict = load_positions_from_database()
+    buy_sell_lock = threading.Lock()
     print(f"Initial symbols to buy: {symbols_to_buy}")
     print(f"Initial symbols to sell: {symbols_to_sell_dict}")
 
     if not fetch_access_token_and_account_id():
-        print(f"{RED}Failed to fetch access token or account ID. Exiting.{RESET}")
-        logging.error("Failed to fetch access token or account ID. Exiting.")
-        return
+        print(f"{RED}Failed to fetch access token or account ID. Continuing anyway.{RESET}")
+        logging.error("Failed to fetch access token or account ID. Continuing.")
 
-    stop_if_stock_market_is_closed()
-
-    # Print initial database state
-    print_database_tables()
-
-    # Schedule buy and sell checks
-    schedule.every(5).minutes.do(
-        lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
-    ).tag('buy-task')
-    schedule.every(5).minutes.do(
-        lambda: sell_stocks(symbols_to_sell_dict, buy_sell_lock)
-    ).tag('sell-task')
-
-    # Run immediately for testing
-    buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
-    sell_stocks(symbols_to_sell_dict, buy_sell_lock)
-
-    print("Entering main loop. Program will run indefinitely.")
     while True:
         try:
+            stop_if_stock_market_is_closed()
             current_datetime = datetime.now(eastern)
             current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-            print(f"\n{current_time_str} Checking schedule...")
 
-            # Check day trade limits
-            day_trades = count_day_trades()
-            print(f"Day trades in last 5 business days: {day_trades}")
-            logging.info(f"{current_time_str} Day trades in last 5 business days: {day_trades}")
-            if day_trades >= 3:
-                print(f"{RED}Day trade limit (3) reached. Skipping buy/sell tasks.{RESET}")
-                logging.warning(f"{current_time_str} Day trade limit (3) reached.")
-                schedule.clear('buy-task')
-                schedule.clear('sell-task')
-            else:
-                # Ensure tasks are scheduled
-                if not any(job.tags == {'buy-task'} for job in schedule.jobs):
-                    schedule.every(5).minutes.do(
-                        lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock)
-                    ).tag('buy-task')
-                if not any(job.tags == {'sell-task'} for job in schedule.jobs):
-                    schedule.every(5).minutes.do(
-                        lambda: sell_stocks(symbols_to_sell_dict, buy_sell_lock)
-                    ).tag('sell-task')
+            account = client_get_account()
+            cash_balance = round(float(account['cash_only_buying_power']), 2)
+            print("------------------------------------------------------------------------------------")
+            print("\n")
+            print("*****************************************************")
+            print("******** Billionaire Buying Strategy Version ********")
+            print("*****************************************************")
+            print("2025 Edition of the Advanced Stock Market Trading Robot, Version 8 ")
+            print("by https://github.com/CodeProSpecialist")
+            print("------------------------------------------------------------------------------------")
+            print(f" {current_time_str} Cash Balance: ${cash_balance}")
+            day_trade_count = count_day_trades()
+            print("\n")
+            print(f"Current day trade number: {day_trade_count} out of 3 in 5 business days")
+            print("\n")
+            print("------------------------------------------------------------------------------------")
+            print("\n")
 
-            schedule.run_pending()
+            symbols_to_buy = get_symbols_to_buy()
+            if not symbols_to_sell_dict:
+                symbols_to_sell_dict = update_symbols_to_sell_from_api()
+
+            print("Starting buy and sell threads...")
+            buy_thread = threading.Thread(target=buy_stocks, args=(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock))
+            sell_thread = threading.Thread(target=sell_stocks, args=(symbols_to_sell_dict, buy_sell_lock))
+
+            buy_thread.start()
+            sell_thread.start()
+
+            buy_thread.join()
+            sell_thread.join()
+            print("Buy and sell threads completed.")
+
+            if PRINT_SYMBOLS_TO_BUY:
+                print("\n")
+                print("------------------------------------------------------------------------------------")
+                print("\n")
+                print("Symbols to Purchase:")
+                print("\n")
+                for symbol in symbols_to_buy:
+                    current_price = client_get_quote(symbol)
+                    if current_price is not None:
+                        print(f"Symbol: {symbol} | Current Price: {GREEN if current_price > get_previous_price(symbol) else RED}${current_price:.2f}{RESET}")
+                print("\n")
+                print("------------------------------------------------------------------------------------")
+                print("\n")
+
+            if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+                print_database_tables()
+
+            if DEBUG:
+                print("\n")
+                print("------------------------------------------------------------------------------------")
+                print("\n")
+                print("Symbols to Purchase:")
+                print("\n")
+                for symbol in symbols_to_buy:
+                    current_price = client_get_quote(symbol)
+                    atr_low_price = get_atr_low_price(symbol)
+                    if current_price is not None and atr_low_price is not None:
+                        print(f"Symbol: {symbol} | Current Price: {GREEN if current_price > get_previous_price(symbol) else RED}${current_price:.2f}{RESET} | ATR low buy signal price: ${atr_low_price:.2f}")
+                print("\n")
+                print("------------------------------------------------------------------------------------")
+                print("\n")
+                print("\nSymbols to Sell:")
+                print("\n")
+                for symbol, _ in symbols_to_sell_dict.items():
+                    current_price = client_get_quote(symbol)
+                    atr_high_price = get_atr_high_price(symbol)
+                    if current_price is not None and atr_high_price is not None:
+                        print(f"Symbol: {symbol} | Current Price: {GREEN if current_price > get_previous_price(symbol) else RED}${current_price:.2f}{RESET} | ATR high sell signal profit price: ${atr_high_price:.2f}")
+                print("\n")
 
             # Refresh token every 12 hours
             if last_token_fetch_time and (datetime.now() - last_token_fetch_time).total_seconds() > 12 * 3600:
@@ -1474,29 +1507,31 @@ def main():
                     print(f"{RED}Failed to refresh access token. Continuing anyway.{RESET}")
                     logging.error("Failed to refresh access token. Continuing.")
 
-            # Print database every 15 minutes
-            if int(current_datetime.strftime("%M")) % 15 == 0:
-                print_database_tables()
-
-            time.sleep(60)  # Check every minute
+            print("Waiting 1 minute before checking price data again........")
+            time.sleep(60)
 
         except KeyboardInterrupt:
-            print(f"\n{YELLOW}Keyboard interrupt received. Continuing to run indefinitely.{RESET}")
-            logging.info("Keyboard interrupt received. Continuing to run.")
-            time.sleep(60)  # Prevent rapid interrupt spamming
+            print(f"\n{YELLOW}Keyboard interrupt received. Exiting gracefully...{RESET}")
+            logging.info("Program interrupted by user. Exiting.")
+            # Cleanup
+            schedule.clear()
+            SessionLocal.remove()
+            print(f"{GREEN}Program terminated.{RESET}")
+            logging.info("Program terminated.")
+            break
         except Exception as e:
             print(f"{RED}Error in main loop: {e}{RESET}")
             logging.error(f"Main loop error: {e}")
-            time.sleep(60)  # Wait before retrying
+            time.sleep(120)  # Wait 2 minutes on error
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"{RED}Fatal error: {e}{RESET}")
-        logging.error(f"Fatal error: {e}")
-        # Instead of raising, log and restart main loop
-        logging.info("Restarting main loop due to fatal error.")
-        main()
-    
-
+    while True:
+        try:
+            print("Initializing trading bot...")
+            main()
+            break  # Exit if main completes normally (only possible via KeyboardInterrupt)
+        except Exception as e:
+            print(f"{RED}Fatal error: {e}{RESET}")
+            logging.error(f"Fatal error: {e}")
+            logging.info("Restarting main loop due to fatal error.")
+            time.sleep(120)  # Wait 2 minutes before restarting
