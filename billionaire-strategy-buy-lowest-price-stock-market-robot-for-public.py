@@ -215,15 +215,14 @@ def get_opening_price(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def client_get_quote(symbol, retries=3):
-    print(f"Fetching current price for {symbol}...")
+    print(f"Fetching current price for {symbol} from Public.com...")
     for attempt in range(retries):
         try:
-            return get_cached_data(symbol, 'current_price', _fetch_current_price_public, symbol)
+            return get_cached_data(symbol, 'current_price_public', _fetch_current_price_public, symbol)
         except Exception as e:
             logging.error(f"Retry {attempt + 1}/{retries} failed for {symbol}: {e}")
-            # Fallback to yfinance if Public.com fails
-            return get_cached_data(symbol, 'current_price_yf', _fetch_current_price_yf, symbol)
-        time.sleep(2 ** attempt)
+            time.sleep(2 ** attempt)
+    logging.error(f"All retries failed for {symbol}, no price data available.")
     return None
 
 @sleep_and_retry
@@ -240,7 +239,7 @@ def _fetch_current_price_public(symbol):
             }
         ]
     }
-    response = requests.post(url, headers=HEADERS, json=request_body, timeout=10)
+    response = requests.post(url, headers=HEADERS, json=request_body, timeout=5)
     response.raise_for_status()
     data = response.json()
     quotes = data.get("quotes", [])
@@ -250,56 +249,6 @@ def _fetch_current_price_public(symbol):
         return round(last, 4)
     else:
         raise ValueError("No successful quote from Public.com")
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def _fetch_current_price_yf(symbol):
-    with yf_lock:
-        yf_symbol = symbol.replace('.', '-')
-        current_datetime = datetime.now(eastern)
-        pre_market_start = time2(4, 0)
-        pre_market_end = time2(9, 30)
-        market_start = time2(9, 30)
-        market_end = time2(16, 0)
-        post_market_start = time2(16, 0)
-        post_market_end = time2(20, 0)
-        stock_data = yf.Ticker(yf_symbol)
-        try:
-            if pre_market_start <= current_datetime.time() < pre_market_end:
-                data = stock_data.history(start=current_datetime.strftime('%Y-%m-%d'), interval='1m', prepost=True)
-                if not data.empty:
-                    data.index = data.index.tz_convert(eastern)
-                    pre_market_data = data.between_time(pre_market_start, pre_market_end)
-                    current_price = float(pre_market_data['Close'].iloc[-1]) if not pre_market_data.empty else None
-                    if current_price is None:
-                        current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-                else:
-                    current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-            elif market_start <= current_datetime.time() < market_end:
-                data = stock_data.history(period='1d', interval='1m')
-                if not data.empty:
-                    data.index = data.index.tz_convert(eastern)
-                    current_price = float(data['Close'].iloc[-1]) if not data.empty else None
-                    if current_price is None:
-                        current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-                else:
-                    current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-            elif market_end <= current_datetime.time() < post_market_end:
-                data = stock_data.history(start=current_datetime.strftime('%Y-%m-%d'), interval='1m', prepost=True)
-                if not data.empty:
-                    data.index = data.index.tz_convert(eastern)
-                    post_market_data = data.between_time(post_market_start, post_market_end)
-                    current_price = float(post_market_data['Close'].iloc[-1]) if not post_market_data.empty else None
-                    if current_price is None:
-                        current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-                else:
-                    current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-            else:
-                current_price = float(stock_data.history(period='1d')['Close'].iloc[-1])
-            return round(current_price, 4)
-        except Exception as e:
-            logging.error(f"yfinance error for {yf_symbol}: {e}")
-            raise
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -322,7 +271,7 @@ def get_atr_low_price(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_average_true_range(symbol):
-    print(f"Calculating ATR for {symbol}...")
+    print(f"Calculating ATR for {symbol} using yfinance...")
     yf_symbol = symbol.replace('.', '-')
     ticker = yf.Ticker(yf_symbol)
     data = ticker.history(period='30d')
@@ -339,7 +288,7 @@ def get_average_true_range(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def is_in_uptrend(symbol):
-    print(f"Checking if {symbol} is in uptrend...")
+    print(f"Checking if {symbol} is in uptrend using yfinance...")
     yf_symbol = symbol.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='200d')
@@ -355,7 +304,7 @@ def is_in_uptrend(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_daily_rsi(symbol):
-    print(f"Calculating daily RSI for {symbol}...")
+    print(f"Calculating daily RSI for {symbol} using yfinance...")
     yf_symbol = symbol.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='30d', interval='1d')
@@ -368,7 +317,7 @@ def get_daily_rsi(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def calculate_technical_indicators(symbols, lookback_days=90):
-    print(f"Calculating technical indicators for {symbols}...")
+    print(f"Calculating technical indicators for {symbols} using yfinance...")
     yf_symbol = symbols.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period=f'{lookback_days}d')
@@ -389,7 +338,7 @@ def calculate_technical_indicators(symbols, lookback_days=90):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def calculate_rsi(symbols, period=14, interval='5m'):
-    print(f"Calculating RSI for {symbols} (period={period}, interval={interval})...")
+    print(f"Calculating RSI for {symbols} (period={period}, interval={interval}) using yfinance...")
     yf_symbol = symbols.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='1d', interval=interval, prepost=True)
@@ -407,7 +356,7 @@ def print_technical_indicators(symbols, historical_data):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_last_price_within_past_5_minutes(symbols_to_buy_list):
-    print("Fetching last prices within past 5 minutes...")
+    print("Fetching last prices within past 5 minutes using yfinance...")
     results = {}
     current_datetime = datetime.now(eastern)
     end_time = current_datetime
