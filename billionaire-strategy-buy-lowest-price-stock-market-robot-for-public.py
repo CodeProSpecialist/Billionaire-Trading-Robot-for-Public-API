@@ -64,7 +64,8 @@ interval_map = {
     '15min': 900,
     '30min': 1800,
     '45min': 2700,
-    '60min': 3600
+    '60min': 3600,
+    '120min': 7200  # Added for 2-hour interval
 }
 stock_data = {}
 previous_prices = {}
@@ -131,6 +132,26 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
         data_cache[key] = {'timestamp': current_time, 'data': data}
         print(f"Cached {data_type} for {symbols}.")
         return data
+
+def get_2_hour_intraday_data(symbol, interval='5m'):
+    """
+    Fetch 2-hour intraday OHLC data for better candlestick reversal detection.
+    """
+    print(f"Fetching 2-hour {interval} data for {symbol}...")
+    yf_symbol = symbol.replace('.', '-')
+    end_time = datetime.now(eastern)
+    start_time = end_time - timedelta(hours=2)
+    try:
+        data = yf.download(yf_symbol, start=start_time, end=end_time, interval=interval, prepost=True)
+        if not data.empty:
+            print(f"Retrieved {len(data)} candles for {yf_symbol} over 2 hours.")
+            return data
+        else:
+            print(f"No data returned for {yf_symbol}.")
+            return pd.DataFrame()
+    except Exception as e:
+        logging.error(f"Error fetching 2-hour data for {yf_symbol}: {e}")
+        return pd.DataFrame()
 
 def stop_if_stock_market_is_closed():
     while True:
@@ -747,7 +768,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         current_color = GREEN if current_price >= 0 else RED
         print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
 
-        # Update price history for the symbol at specified intervals
+        # Update price history for the symbol at specified intervals (now includes 120min)
         current_timestamp = time.time()
         if sym not in price_history:
             price_history[sym] = {interval: [] for interval in interval_map}
@@ -766,14 +787,31 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
             continue
 
+        # Fetch 2-hour intraday data for improved reversal detection
+        intraday_df = get_2_hour_intraday_data(sym, interval='5m')
+        if intraday_df.empty or len(intraday_df) < 3:
+            print(f"Insufficient 2-hour intraday data for {sym}. Falling back to daily.")
+            use_intraday = False
+        else:
+            print(f"Using 2-hour intraday data ({len(intraday_df)} candles) for {sym}.")
+            use_intraday = True
+
         # --- Score calculation ---
         score = 0
-        close = df['Close'].values
-        open_ = df['Open'].values
-        high = df['High'].values
-        low = df['Low'].values
+        if use_intraday:
+            close = intraday_df['Close'].values
+            open_ = intraday_df['Open'].values
+            high = intraday_df['High'].values
+            low = intraday_df['Low'].values
+            lookback_candles = min(10, len(close))  # Check last 10 candles for patterns in 2 hours
+        else:
+            close = df['Close'].values
+            open_ = df['Open'].values
+            high = df['High'].values
+            low = df['Low'].values
+            lookback_candles = min(20, len(close))
 
-        # Candlestick bullish reversal patterns
+        # Candlestick bullish reversal patterns (improved with intraday)
         print("Analyzing candlestick patterns...")
         bullish_patterns = [
             talib.CDLHAMMER, talib.CDLENGULFING, talib.CDLMORNINGSTAR,
@@ -783,7 +821,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         pattern_detected = False
         for f in bullish_patterns:
             res = f(open_, high, low, close)
-            if res[-1] > 0:
+            if len(res) > 0 and res[-1] > 0:
                 pattern_name = f.__name__.replace('CDL', '').lower().replace('hammer', 'Hammer').replace('engulfing', 'Bullish Engulfing')
                 print(f"Bullish pattern detected: {pattern_name} (value: {res[-1]})")
                 score += 1
@@ -792,22 +830,23 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         if not pattern_detected:
             print("No bullish candlestick pattern detected.")
 
-        # RSI decrease
-        rsi = talib.RSI(close)
-        latest_rsi = rsi[-1]
-        rsi_color = GREEN if latest_rsi >= 50 else RED
-        print(f"Latest RSI: {rsi_color}{latest_rsi:.2f}{RESET}")
-        if latest_rsi < 50:
+        # RSI decrease (using intraday if available)
+        rsi = talib.RSI(close, timeperiod=14)
+        latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else None
+        rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED
+        print(f"Latest RSI: {rsi_color}{latest_rsi:.2f if latest_rsi else 'N/A'}{RESET}")
+        if latest_rsi and latest_rsi < 50:
             score += 1
             print("RSI < 50: +1 score")
 
-        # Price decrease 0.3%
-        price_decrease_03 = close[-1] <= close[-2] * 0.997
-        prev_close_color = GREEN if close[-2] >= 0 else RED
+        # Price decrease 0.3% (from recent high in lookback)
+        recent_high = np.max(high[-lookback_candles:]) if len(high) >= lookback_candles else close[-1]
+        price_decrease_03 = close[-1] <= recent_high * 0.997
+        prev_high_color = GREEN if recent_high >= 0 else RED
         curr_close_color = GREEN if close[-1] >= 0 else RED
-        print(f"Previous close: {prev_close_color}${close[-2]:.4f}{RESET}, Current close: {curr_close_color}${close[-1]:.4f}{RESET}")
+        print(f"Recent high (2hr lookback): {prev_high_color}${recent_high:.4f}{RESET}, Current close: {curr_close_color}${close[-1]:.4f}{RESET}")
         if price_decrease_03:
-            print("Price decreased >= 0.3%: +1 score")
+            print("Price decreased >= 0.3% from recent high: +1 score")
             score += 1
 
         print(f"Initial score after basic checks: {score}")
@@ -815,19 +854,19 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
             continue
 
-# Calculate volume decrease
-        print(f"Calculating volume metrics for {sym}...")
-        recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
-        prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
+        # Calculate volume decrease (using intraday)
+        if use_intraday:
+            recent_avg_volume = intraday_df['Volume'].tail(5).mean() if len(intraday_df) >= 5 else 0
+            prior_avg_volume = intraday_df['Volume'].tail(10).head(5).mean() if len(intraday_df) >= 10 else recent_avg_volume
+        else:
+            recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
+            prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
         volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
         print(f"Recent avg volume: {recent_avg_volume:.0f}, Prior avg volume: {prior_avg_volume:.0f}, Volume decrease: {volume_decrease}")
 
-        # Calculate RSI decrease
-        print(f"Calculating RSI metrics for {sym}...")
-        close_prices = df['Close'].values
-        rsi_series = talib.RSI(close_prices, timeperiod=14)
+        # Calculate RSI decrease (using intraday)
+        rsi_series = talib.RSI(close, timeperiod=14)
         rsi_decrease = False
-        latest_rsi = rsi_series[-1] if len(rsi_series) > 0 else None
         if len(rsi_series) >= 10:
             recent_rsi_values = rsi_series[-5:][~np.isnan(rsi_series[-5:])]
             prior_rsi_values = rsi_series[-10:-5][~np.isnan(rsi_series[-10:-5])]
@@ -845,19 +884,19 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         rsi_color_prior = GREEN if prior_avg_rsi >= 50 else RED
         print(f"Latest RSI: {rsi_color if latest_rsi else None}{latest_rsi:.2f}{RESET}, Recent avg RSI: {rsi_color_recent}{recent_avg_rsi:.2f}{RESET}, Prior avg RSI: {rsi_color_prior}{prior_avg_rsi:.2f}{RESET}, RSI decrease: {rsi_decrease}")
 
-        # Calculate MACD
+        # Calculate MACD (using daily for longer term)
         print(f"Calculating MACD for {sym}...")
         short_window = 12
         long_window = 26
         signal_window = 9
-        macd, macd_signal, _ = talib.MACD(close_prices, fastperiod=short_window, slowperiod=long_window,
+        macd, macd_signal, _ = talib.MACD(close, fastperiod=short_window, slowperiod=long_window,
                                           signalperiod=signal_window)
-        latest_macd = round(macd[-1], 4) if len(macd) > 0 else None
-        latest_macd_signal = round(macd_signal[-1], 4) if len(macd_signal) > 0 else None
-        macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None else False
-        macd_color = GREEN if latest_macd > latest_macd_signal else RED
-        signal_color = GREEN if latest_macd_signal >= 0 else RED
-        print(f"Latest MACD: {macd_color}{latest_macd:.4f}{RESET}, Signal: {signal_color}{latest_macd_signal:.4f}{RESET}, MACD above signal: {macd_above_signal}")
+        latest_macd = round(macd[-1], 4) if len(macd) > 0 and not np.isnan(macd[-1]) else None
+        latest_macd_signal = round(macd_signal[-1], 4) if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
+        macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None and latest_macd_signal is not None else False
+        macd_color = GREEN if latest_macd and latest_macd_signal and latest_macd > latest_macd_signal else RED
+        signal_color = GREEN if latest_macd_signal and latest_macd_signal >= 0 else RED
+        print(f"Latest MACD: {macd_color}{latest_macd:.4f if latest_macd else 'N/A'}{RESET}, Signal: {signal_color}{latest_macd_signal:.4f if latest_macd_signal else 'N/A'}{RESET}, MACD above signal: {macd_above_signal}")
 
         # Check price increase (for logging)
         previous_price = get_previous_price(sym)
@@ -868,68 +907,59 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         change_color = GREEN if change >= 0 else RED
         print(f"Price check: Current = {curr_color}${current_price:.2f}{RESET}, Previous = {prev_color}${previous_price:.2f}{RESET}, Increase >0.5%: {price_increase} (change: {change_color}${change:.2f}{RESET})")
 
-        # Check price drop
-        print(f"Checking price drop for {sym}...")
-        last_prices = get_last_price_within_past_5_minutes([sym])
-        last_price = last_prices.get(sym)
-        if last_price is None:
-            try:
-                last_price = round(float(df['Close'].iloc[-1]), 4)
-                last_color = GREEN if last_price >= 0 else RED
-                print(f"No price found in past 5 minutes. Using last closing price: {last_color}${last_price:.4f}{RESET}")
-            except Exception as e:
-                print(f"Error fetching last closing price for {yf_symbol}: {e}")
-                continue
+        # Check price drop from 2-hour high
+        print(f"Checking price drop for {sym} using 2-hour history...")
+        if use_intraday:
+            session_high = intraday_df['High'].max()
+            drop_percent = (session_high - current_price) / session_high * 100
+            price_decline = drop_percent >= 0.2
+            high_color = GREEN if session_high >= 0 else RED
+            print(f"2-hour session high: {high_color}${session_high:.4f}{RESET}, Drop: {drop_percent:.2f}%, Decline >=0.2%: {price_decline}")
+        else:
+            # Fallback to 5-min check
+            last_prices = get_last_price_within_past_5_minutes([sym])
+            last_price = last_prices.get(sym)
+            if last_price is None:
+                try:
+                    last_price = round(float(df['Close'].iloc[-1]), 4)
+                    last_color = GREEN if last_price >= 0 else RED
+                    print(f"No price found in past 5 minutes. Using last closing price: {last_color}${last_price:.4f}{RESET}")
+                except Exception as e:
+                    print(f"Error fetching last closing price for {yf_symbol}: {e}")
+                    continue
+            price_decline_threshold = last_price * (1 - 0.002)
+            threshold_color = GREEN if price_decline_threshold >= 0 else RED
+            print(f"Price decline threshold (0.2% below last): {threshold_color}${price_decline_threshold:.4f}{RESET}")
+            price_decline = current_price <= price_decline_threshold
+            print(f"Price decline detected: {price_decline} (Current: {curr_color}${current_price:.4f}{RESET} <= Threshold: {threshold_color}${price_decline_threshold:.4f}{RESET})")
 
-        price_decline_threshold = last_price * (1 - 0.002)
-        threshold_color = GREEN if price_decline_threshold >= 0 else RED
-        print(f"Price decline threshold (0.2% below last): {threshold_color}${price_decline_threshold:.4f}{RESET}")
-        price_decline = current_price <= price_decline_threshold
-        print(f"Price decline detected: {price_decline} (Current: {curr_color}${current_price:.4f}{RESET} <= Threshold: {threshold_color}${price_decline_threshold:.4f}{RESET})")
-
-        # Calculate short-term price trend
+        # Calculate short-term price trend using price_history 120min if available
         short_term_trend = None
-        if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
-            recent_prices = price_history[sym]['5min'][-2:]
+        if sym in price_history and '120min' in price_history[sym] and len(price_history[sym]['120min']) >= 2:
+            recent_prices = price_history[sym]['120min'][-2:]
             short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
             trend_color = GREEN if short_term_trend == 'up' else RED
-            print(f"Short-term price trend (5min): {trend_color}{short_term_trend}{RESET}")
+            print(f"Short-term price trend (2hr): {trend_color}{short_term_trend}{RESET}")
 
-        # Detect bullish reversal candlestick patterns
-        print(f"Checking for bullish reversal patterns in {sym}...")
-        open_prices = df['Open'].values
-        high_prices = df['High'].values
-        low_prices = df['Low'].values
-        close_prices = df['Close'].values
-
+        # Detect bullish reversal candlestick patterns using intraday
+        print(f"Checking for bullish reversal patterns in {sym} using 2-hour data...")
         bullish_reversal_detected = False
         reversal_candle_index = None
         detected_patterns = []
-        for i in range(-1, -21, -1):
-            if len(df) < abs(i):
+        ohlc_slice = slice(-lookback_candles, None)
+        for i in range(-1, -lookback_candles, -1):
+            if abs(i) > len(open_):
                 continue
             try:
                 patterns = {
-                    'Hammer': talib.CDLHAMMER(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                              close_prices[:i + 1])[i] != 0,
-                    'Bullish Engulfing':
-                        talib.CDLENGULFING(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                           close_prices[:i + 1])[i] > 0,
-                    'Morning Star': talib.CDLMORNINGSTAR(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                                         close_prices[:i + 1])[i] != 0,
-                    'Piercing Line': talib.CDLPIERCING(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                                       close_prices[:i + 1])[i] != 0,
-                    'Three White Soldiers':
-                        talib.CDL3WHITESOLDIERS(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                                close_prices[:i + 1])[i] != 0,
-                    'Dragonfly Doji':
-                        talib.CDLDRAGONFLYDOJI(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                               close_prices[:i + 1])[i] != 0,
-                    'Inverted Hammer':
-                        talib.CDLINVERTEDHAMMER(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                                close_prices[:i + 1])[i] != 0,
-                    'Tweezer Bottom': talib.CDLMATCHINGLOW(open_prices[:i + 1], high_prices[:i + 1], low_prices[:i + 1],
-                                                           close_prices[:i + 1])[i] != 0,
+                    'Hammer': talib.CDLHAMMER(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Bullish Engulfing': talib.CDLENGULFING(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] > 0,
+                    'Morning Star': talib.CDLMORNINGSTAR(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Piercing Line': talib.CDLPIERCING(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Three White Soldiers': talib.CDL3WHITESOLDIERS(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Dragonfly Doji': talib.CDLDRAGONFLYDOJI(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Inverted Hammer': talib.CDLINVERTEDHAMMER(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
+                    'Tweezer Bottom': talib.CDLMATCHINGLOW(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
                 }
                 current_detected = [name for name, detected in patterns.items() if detected]
                 if current_detected:
@@ -943,12 +973,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 continue
 
         if detected_patterns:
-            if sym in price_history:
-                for interval, prices in price_history[sym].items():
-                    if prices:
-                        print(f"{yf_symbol}: Price history at {interval}: {prices[-5:]}")
+            if sym in price_history and '120min' in price_history[sym]:
+                prices = price_history[sym]['120min']
+                print(f"{yf_symbol}: 2-hour price history: {prices[-5:]}")
         if price_decline:
-            print(f"{yf_symbol}: Price decline >= 0.2% detected (Current price = {curr_color}${current_price:.2f}{RESET}, Threshold = {threshold_color}${price_decline_threshold:.2f}{RESET})")
+            print(f"{yf_symbol}: Price decline >= 0.2% from 2-hour high detected (Current price = {curr_color}${current_price:.2f}{RESET})")
         if volume_decrease:
             print(f"{yf_symbol}: Volume decrease detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
         if rsi_decrease:
@@ -967,11 +996,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi_color}{daily_rsi}{RESET}). Skipping.")
             continue
 
-        # Pattern-specific buy conditions with scoring
+        # Pattern-specific buy conditions with scoring (enhanced with 2hr data)
         buy_conditions_met = False
         specific_reason = ""
         if bullish_reversal_detected:
-            print("Evaluating pattern-specific conditions...")
+            print("Evaluating pattern-specific conditions with 2-hour context...")
             score += 2
             print(f"Base score for bullish reversal: {score}")
             price_stable = True
@@ -995,13 +1024,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 print("RSI decrease: +1 score")
                 score += 1
             if price_decline:
-                print("Price decline: +1 score")
+                print("Price decline from 2hr high: +1 score")
                 score += 1
 
             print("Pattern-specific scoring:")
             for pattern in detected_patterns:
                 if pattern == 'Hammer':
-                    hammer_condition = latest_rsi < 35 and price_decline >= (last_price * 0.003)
+                    hammer_condition = latest_rsi < 35 and drop_percent >= 0.3 if use_intraday else price_decline
                     condition_met = "YES" if hammer_condition else "NO"
                     color = GREEN if hammer_condition else RED
                     print(f"  {pattern}: RSI <35 & decline >=0.3%: {color}{condition_met}{RESET} {'+1 score' if hammer_condition else ''}")
@@ -1060,7 +1089,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"Final buy score for {sym}: {score}")
             if score >= 4:
                 buy_conditions_met = True
-                specific_reason = f"Score: {score}, patterns: {', '.join(detected_patterns)}"
+                specific_reason = f"Score: {score}, patterns: {', '.join(detected_patterns)}, 2hr drop: {drop_percent:.2f}%" if use_intraday else f"Score: {score}, patterns: {', '.join(detected_patterns)}"
                 print(f"{GREEN}BUY CONDITIONS MET: {specific_reason}{RESET}")
             else:
                 print(f"{RED}Buy score too low ({score} < 4). Skipping.{RESET}")
@@ -1349,6 +1378,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     try:
         with buy_sell_lock:
             print("Updating database with sell transactions...")
+            session = SessionLocal()
             for symbol, qty, current_price in symbols_to_remove:
                 del symbols_to_sell_dict[symbol]
                 trade_history = TradeHistory(
@@ -1358,13 +1388,12 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                     price=current_price,
                     date=today_date_str
                 )
-                session = SessionLocal()
                 session.add(trade_history)
                 session.query(Position).filter_by(symbols=symbol).delete()
                 session.commit()
-                session.close()
             print("Database updated successfully.")
             refresh_after_sell()
+            session.close()
     except SQLAlchemyError as e:
         session.rollback()
         print(f"{RED}Database error: {str(e)}{RESET}")
@@ -1507,8 +1536,8 @@ def main():
                     print(f"{RED}Failed to refresh access token. Continuing anyway.{RESET}")
                     logging.error("Failed to refresh access token. Continuing.")
 
-            print("Waiting 1 minute before checking price data again........")
-            time.sleep(60)
+            print("Waiting 45 seconds before checking price data again........")
+            time.sleep(45)
 
         except KeyboardInterrupt:
             print(f"\n{YELLOW}Keyboard interrupt received. Exiting gracefully...{RESET}")
