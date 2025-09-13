@@ -19,6 +19,7 @@ from sqlalchemy.orm.exc import NoResultFound
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
 import numpy as np
+import pandas as pd
 
 # ANSI color codes for terminal output
 GREEN = "\033[92m"
@@ -76,6 +77,10 @@ CACHE_EXPIRY = 120  # 2 minutes
 CALLS = 60
 PERIOD = 60
 
+# 90-day high/low tracking
+ninetydays_highlow = {}  # symbol -> {'highs': [list of highs], 'lows': [list of lows], 'min_low': float, 'max_high': float}
+NINETY_DAYS = 90
+
 # Timezone
 eastern = pytz.timezone('US/Eastern')
 
@@ -132,6 +137,66 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
         data_cache[key] = {'timestamp': current_time, 'data': data}
         print(f"Cached {data_type} for {symbols}.")
         return data
+
+def update_90day_highlow(symbol):
+    """
+    Fetch and update 90-day daily high/low for the symbol.
+    """
+    print(f"Updating 90-day high/low for {symbol}...")
+    yf_symbol = symbol.replace('.', '-')
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=NINETY_DAYS)
+    try:
+        data = yf.download(yf_symbol, start=start_date, end=end_date, interval='1d')
+        if data.empty:
+            print(f"No 90-day data for {yf_symbol}.")
+            return
+        highs = data['High'].tolist()
+        lows = data['Low'].tolist()
+        ninetydays_highlow[symbol] = {
+            'highs': highs,
+            'lows': lows,
+            'min_low': min(lows),
+            'max_high': max(highs)
+        }
+        print(f"Updated 90-day data for {symbol}: min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
+    except Exception as e:
+        logging.error(f"Error updating 90-day data for {yf_symbol}: {e}")
+
+def get_90day_min_low(symbol):
+    """
+    Get the minimum low price over the past 90 days for the symbol.
+    """
+    if symbol not in ninetydays_highlow:
+        update_90day_highlow(symbol)
+    if symbol in ninetydays_highlow:
+        return ninetydays_highlow[symbol]['min_low']
+    return None
+
+def rank_symbols_by_90day_low(symbols_list):
+    """
+    Rank symbols by how close current price is to 90-day min low (ascending ratio).
+    Reorder the list to prioritize stocks at their lowest 90-day price.
+    """
+    print("Ranking symbols by 90-day low proximity...")
+    ranked = []
+    for sym in symbols_list:
+        current_price = client_get_quote(sym)
+        if current_price is None:
+            continue
+        min_low = get_90day_min_low(sym)
+        if min_low is None:
+            continue
+        ratio = current_price / min_low
+        ranked.append((sym, ratio))
+    # Sort by ascending ratio (closest to low first)
+    ranked.sort(key=lambda x: x[1])
+    reordered_symbols = [sym for sym, _ in ranked]
+    print(f"Reordered symbols: {reordered_symbols}")
+    for sym, ratio in ranked:
+        ratio_color = GREEN if ratio <= 1.01 else YELLOW
+        print(f"{sym}: ratio to 90d low = {ratio_color}{ratio:.4f}{RESET}")
+    return reordered_symbols
 
 def get_2_hour_intraday_data(symbol, interval='5m'):
     """
@@ -720,6 +785,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print("No symbols to buy.")
         logging.info("No symbols to buy.")
         return
+    # Rank symbols by 90-day low proximity
+    ranked_symbols = rank_symbols_by_90day_low(symbols_to_buy_list)
+    if not ranked_symbols:
+        print("No symbols after ranking.")
+        return
+    symbols_to_buy_list = ranked_symbols  # Use reordered list
     symbols_to_remove = []
     buy_signal = 0
     acc = client_get_account()
@@ -741,6 +812,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         if current_price is None:
             print(f"No valid price data for {sym}. Skipping.")
             continue
+        # Update 90-day data if needed
+        get_90day_min_low(sym)
         historical_data = calculate_technical_indicators(sym, lookback_days=200)
         if historical_data.empty:
             print(f"No historical data for {sym}. Skipping.")
@@ -767,6 +840,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             continue
         current_color = GREEN if current_price >= 0 else RED
         print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
+
+        # Check if at 90-day low (optional filter, but since ranked, proceed)
+        min_low = get_90day_min_low(sym)
+        if min_low and current_price > min_low * 1.01:
+            print(f"{sym}: Not sufficiently close to 90-day low (${min_low:.4f}). Skipping for stricter filter.")
+            continue
 
         # Update price history for the symbol at specified intervals (now includes 120min)
         current_timestamp = time.time()
@@ -1098,7 +1177,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"{RED}No buy conditions met for {sym}. Skipping.{RESET}")
             continue
 
-        # Determine position sizing
+        # Determine position sizing (aggressive for compounding: risk 2% per trade to accelerate growth)
         print(f"Calculating position size for {sym}...")
         filled_qty = 0
         filled_price = current_price
@@ -1107,14 +1186,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             qty = round(total_cost_for_qty / current_price, 4)
             print(f"{yf_symbol}: Using $1.00 fractional share order mode. Qty = {qty:.4f}")
         else:
-            # Volatility-based position sizing
+            # Volatility-based position sizing, but risk 2% for faster compounding
             atr = get_average_true_range(sym)
             if atr is None:
                 print(f"No ATR for {yf_symbol}. Skipping.")
                 continue
             stop_loss_distance = 2 * atr
             risk_per_share = stop_loss_distance
-            risk_amount = 0.01 * total_equity
+            risk_amount = 0.02 * total_equity  # Increased to 2% for aggressive growth
             qty = risk_amount / risk_per_share if risk_per_share > 0 else 0
             total_cost_for_qty = qty * current_price
 
@@ -1290,6 +1369,9 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     current_time_str = now.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
     today_date_str = datetime.today().date().strftime("%Y-%m-%d")
     comparison_date = datetime.today().date()
+    acc = client_get_account()
+    total_equity = acc['equity']
+    is_swing_mode = total_equity < 25000  # PDT rule: swing trade if under 25k
 
     for symbol, (bought_price, purchase_date) in symbols_to_sell_dict.items():
         print(f"\n{'='*60}")
@@ -1306,6 +1388,13 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
         logging.info(f"{symbol}: Purchase date = {bought_date}, Comparison date = {comparison_date}")
 
         if bought_date <= comparison_date:
+            # Swing trading check: must hold 24 hours if under 25k
+            if is_swing_mode:
+                hold_required = bought_date + timedelta(days=1)  # At least 24 hours (approx 1 day)
+                if comparison_date < hold_required:
+                    print(f"{symbol}: Swing mode active (equity < $25k). Must hold until {hold_required}. Skipping sell.")
+                    continue
+
             current_price = client_get_quote(symbol)
             if current_price is None:
                 print(f"{RED}Skipping {symbol}: Could not retrieve current price.{RESET}")
