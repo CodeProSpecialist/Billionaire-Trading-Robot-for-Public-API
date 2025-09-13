@@ -3,6 +3,8 @@ Billionaire Trading Robot for Public API
 
 ( Recommended Operating System: Ubuntu 24.04 LTS Linux ) 
 
+This is the Billionaire Strategy for Buying Great Stocks at the Lowest Price becuase you can never expect that the Sell Price is a profit, although you have the most control over the Buy Price.
+
 run the program with the following commands ( 1 command per command line terminal window, in 3 separate terminal windows. )
 
 python3 stock-list-writer-for-list-of-stock-symbols-to-scan.py
