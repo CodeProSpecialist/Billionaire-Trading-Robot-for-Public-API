@@ -103,3 +103,12 @@ Add the following 2 lines to the bottom of ~/.bashrc in Linux to access Public A
 export ACCOUNT_ID='1234512345'
 # below is the token for public API
 export YOUR_SECRET_KEY='xxxxyour-secret-key-herexxxxxxxxxxxxxxxx'
+
+# below are the Twilio SID and tokens # for the trading robot alerts
+export TWILIO_SID='your-twilio-sid'
+
+export TWILIO_TOKEN='your-twilio-token'
+
+export TWILIO_PHONE='your-twilio-phone'
+
+export ALERT_PHONE='your-alert-phone'
