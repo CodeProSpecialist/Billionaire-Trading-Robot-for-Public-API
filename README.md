@@ -26,7 +26,7 @@ Are you ready to take your stock trading to the next level? Our **cutting-edge t
 Our trading robot is a sophisticated Python-based application that seamlessly integrates with your brokerage account to execute trades automatically. Here’s how it brings your trading strategy to life:
 
 1. **Real-Time Market Data**:
-   - Pulls live stock quotes and historical data using the `yfinance` library, ensuring you have the most up-to-date market insights.
+   - Pulls live stock quotes and historical data, ensuring you have the most up-to-date market insights.
    - Analyzes market trends with technical indicators powered by the `ta-lib` library, enabling data-driven decisions.
 
 2. **Automated Trading Logic**:
