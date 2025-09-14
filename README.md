@@ -67,7 +67,15 @@ Whether you’re looking to capitalize on short-term market movements or build a
 Ready to revolutionize your trading? Follow these simple steps:
 1. Install Anaconda3 and run the provided `install.sh` script to set up dependencies.
 2. Configure your Public.com API key and Twilio credentials as environment variables.
-3. Launch the robot with a single command: `python your_script.py`.
+3. Launch the robot:
+run the program with the following commands ( 1 command per command line terminal window, in 3 separate terminal windows. )
+
+python3 stock-list-writer-for-list-of-stock-symbols-to-scan.py
+
+python3 auto-copy-stock-list-writer.py
+
+python3 billionaire-strategy-buy-lowest-price-stock-market-robot-for-public.py
+
 4. Watch your trading strategy come to life with real-time data and automated execution!
 
 **Join the future of trading—automate, analyze, and achieve your financial goals with the Billionaire Trading Robot!**
