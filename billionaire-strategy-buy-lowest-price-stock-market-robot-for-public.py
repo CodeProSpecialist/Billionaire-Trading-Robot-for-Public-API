@@ -662,6 +662,70 @@ def client_list_positions():
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
+def client_list_open_orders():
+    try:
+        if not account_id:
+            logging.error("No BROKERAGE accountId")
+            return []
+        url = f"{BASE_URL}/trading/{account_id}/orders"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        orders = resp.json().get('orders', [])
+        open_orders = [o for o in orders if o.get('status') == 'OPEN']
+        print(f"Retrieved {len(open_orders)} open orders.")
+        return open_orders
+    except Exception as e:
+        logging.error(f"Error listing open orders: {e}")
+        return []
+
+def get_open_orders_for_symbol(symbol):
+    open_orders = client_list_open_orders()
+    return [o for o in open_orders if o.get('instrument', {}).get('symbol') == symbol]
+
+def ensure_no_open_orders(symbol):
+    print(f"Checking for open orders for {symbol} before placing new order...")
+    open_orders = get_open_orders_for_symbol(symbol)
+    if not open_orders:
+        print(f"No open orders found for {symbol}.")
+        return True
+
+    print(f"Found {len(open_orders)} open orders for {symbol}. Initiating cancellation process...")
+    while open_orders:
+        print(f"Cancelling {len(open_orders)} open orders for {symbol}...")
+        for order in open_orders:
+            order_id = order.get('orderId')
+            if client_cancel_order(order_id):
+                print(f"Cancelled order {order_id} for {symbol}.")
+            else:
+                print(f"Failed to cancel order {order_id} for {symbol}.")
+        print("Waiting 60 seconds for cancellations to process...")
+        time.sleep(60)
+        print("Checking status every 30 seconds until all cancelled...")
+        while True:
+            time.sleep(30)
+            open_orders = get_open_orders_for_symbol(symbol)
+            if not open_orders:
+                print("All open orders for {symbol} have been cancelled.")
+                break
+            print(f"Still {len(open_orders)} open orders for {symbol}. Cancelling again...")
+            for order in open_orders:
+                order_id = order.get('orderId')
+                client_cancel_order(order_id)
+    print("Waiting 30 seconds for final confirmation...")
+    time.sleep(30)
+    open_orders = get_open_orders_for_symbol(symbol)
+    if open_orders:
+        print(f"Warning: Still {len(open_orders)} open orders for {symbol} after final check. Cancelling one more time...")
+        for order in open_orders:
+            order_id = order.get('orderId')
+            client_cancel_order(order_id)
+        time.sleep(30)  # Brief wait after final cancellation
+    else:
+        print(f"Confirmed: No open orders for {symbol}.")
+    return True
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
 def client_place_order(symbol, qty, side, order_type="MARKET", limit_price=None, stop_price=None):
     try:
         if not account_id:
@@ -1234,37 +1298,39 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             reason = f"bullish reversal ({', '.join(detected_patterns)}), {specific_reason}"
             print(f"{GREEN}SUBMITTING BUY ORDER for {api_symbols} due to: {reason}{RESET}")
             try:
-                # Ensure notional value is rounded to 2 decimal places
-                total_cost_for_qty = round(total_cost_for_qty, 2)
-                order_id = client_place_order(api_symbols, qty, "BUY")
-                if order_id:
-                    print(f"Order submitted with ID: {order_id}")
-                    current_time_str = datetime.now(eastern).strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-                    status_info = poll_order_status(order_id)
-                    if status_info and status_info["status"] == "FILLED":
-                        filled_qty = status_info["filled_qty"]
-                        filled_price = status_info["avg_price"] or current_price
-                        actual_cost = filled_qty * filled_price
-                        filled_color = GREEN if filled_price >= 0 else RED
-                        print(f"{current_time_str}, {GREEN}ORDER FILLED{RESET} for {filled_qty:.4f} shares of {api_symbols} at {filled_color}${filled_price:.2f}{RESET}, actual cost: ${actual_cost:.2f}")
-                        logging.info(f"{current_time_str} Order filled for {filled_qty:.4f} shares of {api_symbols}, actual cost: ${actual_cost:.2f}")
+                # Ensure no open orders before placing new buy order
+                if ensure_no_open_orders(api_symbols):
+                    # Ensure notional value is rounded to 2 decimal places
+                    total_cost_for_qty = round(total_cost_for_qty, 2)
+                    order_id = client_place_order(api_symbols, qty, "BUY")
+                    if order_id:
+                        print(f"Order submitted with ID: {order_id}")
+                        current_time_str = datetime.now(eastern).strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+                        status_info = poll_order_status(order_id)
+                        if status_info and status_info["status"] == "FILLED":
+                            filled_qty = status_info["filled_qty"]
+                            filled_price = status_info["avg_price"] or current_price
+                            actual_cost = filled_qty * filled_price
+                            filled_color = GREEN if filled_price >= 0 else RED
+                            print(f"{current_time_str}, {GREEN}ORDER FILLED{RESET} for {filled_qty:.4f} shares of {api_symbols} at {filled_color}${filled_price:.2f}{RESET}, actual cost: ${actual_cost:.2f}")
+                            logging.info(f"{current_time_str} Order filled for {filled_qty:.4f} shares of {api_symbols}, actual cost: ${actual_cost:.2f}")
 
-                        # Record CSV
-                        with open(csv_filename, mode='a', newline='') as csv_file:
-                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                            csv_writer.writerow({
-                                'Date': current_time_str,
-                                'Buy': 'Buy',
-                                'Sell': '',
-                                'Quantity': filled_qty,
-                                'Symbol': api_symbols,
-                                'Price Per Share': filled_price
-                            })
-                        symbols_to_remove.append((api_symbols, filled_price, today_date_str))
-                        # Skip trailing stop for now as not directly supported; can implement manual monitoring
-                    else:
-                        print(f"{RED}Buy order not filled for {api_symbols}{RESET}")
-                        logging.info(f"{current_time_str} Buy order not filled for {api_symbols}")
+                            # Record CSV
+                            with open(csv_filename, mode='a', newline='') as csv_file:
+                                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                csv_writer.writerow({
+                                    'Date': current_time_str,
+                                    'Buy': 'Buy',
+                                    'Sell': '',
+                                    'Quantity': filled_qty,
+                                    'Symbol': api_symbols,
+                                    'Price Per Share': filled_price
+                                })
+                            symbols_to_remove.append((api_symbols, filled_price, today_date_str))
+                            # Skip trailing stop for now as not directly supported; can implement manual monitoring
+                        else:
+                            print(f"{RED}Buy order not filled for {api_symbols}{RESET}")
+                            logging.info(f"{current_time_str} Buy order not filled for {api_symbols}")
 
             except Exception as e:
                 print(f"{RED}Error submitting buy order for {api_symbols}: {e}{RESET}")
@@ -1427,32 +1493,34 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
 
                 if current_price >= sell_threshold:
                     print(f"{GREEN}SELL CONDITION MET: Current price >= threshold{RESET}")
-                    order_id = client_place_order(symbol, qty, "SELL")
-                    if order_id:
-                        status_info = poll_order_status(order_id)
-                        if status_info and status_info["status"] == "FILLED":
-                            filled_qty = status_info["filled_qty"]
-                            filled_price = status_info["avg_price"] or current_price
-                            filled_color = GREEN if filled_price >= 0 else RED
-                            profit = filled_price - bought_price
-                            profit_color = GREEN if profit >= 0 else RED
-                            print(f" {current_time_str}, {GREEN}SOLD{RESET} {filled_qty:.4f} shares of {symbol} at {filled_color}${filled_price:.2f}{RESET} (profit: {profit_color}${profit:.2f}{RESET})")
-                            logging.info(f"{current_time_str} Sold {filled_qty:.4f} shares of {symbol} at {filled_price:.2f}.")
+                    # Ensure no open orders before placing new sell order
+                    if ensure_no_open_orders(symbol):
+                        order_id = client_place_order(symbol, qty, "SELL")
+                        if order_id:
+                            status_info = poll_order_status(order_id)
+                            if status_info and status_info["status"] == "FILLED":
+                                filled_qty = status_info["filled_qty"]
+                                filled_price = status_info["avg_price"] or current_price
+                                filled_color = GREEN if filled_price >= 0 else RED
+                                profit = filled_price - bought_price
+                                profit_color = GREEN if profit >= 0 else RED
+                                print(f" {current_time_str}, {GREEN}SOLD{RESET} {filled_qty:.4f} shares of {symbol} at {filled_color}${filled_price:.2f}{RESET} (profit: {profit_color}${profit:.2f}{RESET})")
+                                logging.info(f"{current_time_str} Sold {filled_qty:.4f} shares of {symbol} at {filled_price:.2f}.")
 
-                            with open(csv_filename, mode='a', newline='') as csv_file:
-                                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                                csv_writer.writerow({
-                                    'Date': current_time_str,
-                                    'Buy': '',
-                                    'Sell': 'Sell',
-                                    'Quantity': filled_qty,
-                                    'Symbol': symbol,
-                                    'Price Per Share': filled_price
-                                })
-                            symbols_to_remove.append((symbol, filled_qty, filled_price))
-                        else:
-                            print(f"{RED}Sell order not filled for {symbol}{RESET}")
-                            client_cancel_order(order_id)
+                                with open(csv_filename, mode='a', newline='') as csv_file:
+                                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                    csv_writer.writerow({
+                                        'Date': current_time_str,
+                                        'Buy': '',
+                                        'Sell': 'Sell',
+                                        'Quantity': filled_qty,
+                                        'Symbol': symbol,
+                                        'Price Per Share': filled_price
+                                    })
+                                symbols_to_remove.append((symbol, filled_qty, filled_price))
+                            else:
+                                print(f"{RED}Sell order not filled for {symbol}{RESET}")
+                                client_cancel_order(order_id)
                 else:
                     change = current_price - bought_price
                     change_color = GREEN if change >= 0 else RED
