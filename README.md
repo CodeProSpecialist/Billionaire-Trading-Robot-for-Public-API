@@ -109,6 +109,8 @@ export TWILIO_SID='your-twilio-sid'
 
 export TWILIO_TOKEN='your-twilio-token'
 
+# below number is your bought twilio phone number that you buy from twilio 
 export TWILIO_PHONE='your-twilio-phone'
 
+# below phone number is connected to Twilio and Whatsapp: 
 export ALERT_PHONE='your-alert-phone'
