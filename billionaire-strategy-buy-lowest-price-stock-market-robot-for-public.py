@@ -308,27 +308,31 @@ def get_atr_low_price(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_average_true_range(symbol):
+    """
+    Calculate the Average True Range (ATR) for a given stock symbol.
+    """
     print(f"Calculating ATR for {symbol} using yfinance...")
-    yf_symbol = symbol.replace('.', '-')
-    ticker = yf.Ticker(yf_symbol)
-    data = ticker.history(period='30d')
-    if data.empty:
-        logging.error(f"No data for {yf_symbol}.")
-        return None
-    try:
-        atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
-        atr_value = atr[-1]
-        print(f"ATR value for {yf_symbol}: {atr_value:.4f}")
-        return atr_value
-    except Exception as e:
-        logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
-        return None
+
+    def _fetch_atr(symbol):
+        yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
+        ticker = yf.Ticker(yf_symbol)
+        data = ticker.history(period='30d')
+        try:
+            atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
+            atr_value = atr[-1]
+            print(f"ATR value for {yf_symbol}: {atr_value:.4f}")
+            return atr_value
+        except Exception as e:
+            logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
+            return None
+
+    return get_cached_data(symbol, 'atr', _fetch_atr, symbol)
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def is_in_uptrend(symbol):
     print(f"Checking if {symbol} is in uptrend using yfinance...")
-    yf_symbol = symbol.replace('.', '-')
+    yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='200d')
     if historical_data.empty or len(historical_data) < 200:
@@ -346,7 +350,7 @@ def is_in_uptrend(symbol):
 @limits(calls=CALLS, period=PERIOD)
 def get_daily_rsi(symbol):
     print(f"Calculating daily RSI for {symbol} using yfinance...")
-    yf_symbol = symbol.replace('.', '-')
+    yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='30d', interval='1d')
     if historical_data.empty:
@@ -900,10 +904,6 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print("No symbols to buy.")
         logging.info("No symbols to buy.")
         return
-    if not symbols_to_buy_list:
-        print("No symbols after ranking.")
-        return
-    symbols_to_buy_list = symbols_to_buy_list  # Use original list
     symbols_to_remove = []
     buy_signal = 0
     acc = client_get_account()
