@@ -127,21 +127,43 @@ nyse_cal = mcal.get_calendar('NYSE')
 
 def fetch_ohlc(symbol, period='1d', interval='1d', start=None, end=None, prepost=False):
     yf_symbol = symbol.replace('.', '-')
-    if start and end:
-        df = yf.download(yf_symbol, start=start, end=end, interval=interval, prepost=prepost)
-    else:
-        ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(period=period, interval=interval, prepost=prepost)
-    if len(df) == 0:
+    try:
+        if start and end:
+            df = yf.download(yf_symbol, start=start, end=end, interval=interval, prepost=prepost)
+        else:
+            ticker = yf.Ticker(yf_symbol)
+            df = ticker.history(period=period, interval=interval, prepost=prepost)
+        
+        # Check if DataFrame is empty
+        if df.empty:
+            logging.error(f"No data returned for {yf_symbol} with period={period}, interval={interval}")
+            return None
+        
+        # Verify expected columns exist
+        required_columns = ['Open', 'High', 'Low', 'Close']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logging.error(f"Missing columns {missing_columns} in DataFrame for {yf_symbol}")
+            return None
+        
+        # Ensure df['Open'] is a Series and convert to list
+        data = {}
+        for col in required_columns:
+            if not isinstance(df[col], pd.Series):
+                logging.error(f"Column {col} in {yf_symbol} is not a pandas Series, type: {type(df[col])}")
+                return None
+            data[col] = df[col].dropna().tolist()
+        
+        # Handle Volume separately
+        data['Volume'] = df['Volume'].dropna().tolist() if 'Volume' in df.columns else [0] * len(df)
+        
+        # Log DataFrame info for debugging
+        logging.info(f"Fetched OHLC for {yf_symbol}: {len(df)} rows, columns: {list(df.columns)}")
+        return data
+    
+    except Exception as e:
+        logging.error(f"Error fetching OHLC for {yf_symbol}: {str(e)}")
         return None
-    data = {
-        'Open': df['Open'].tolist(),
-        'High': df['High'].tolist(),
-        'Low': df['Low'].tolist(),
-        'Close': df['Close'].tolist(),
-        'Volume': df['Volume'].tolist() if 'Volume' in df.columns else [0] * len(df)
-    }
-    return data
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
