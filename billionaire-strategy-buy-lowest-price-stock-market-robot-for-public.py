@@ -182,27 +182,34 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
         return data
 
 def update_90day_highlow(symbol):
-    """
-    Fetch and update 90-day daily high/low for the symbol.
-    """
-    print(f"Updating 90-day high/low for {symbol}...")
+    print(f"Updating 90-day high/low for {symbol} using 200-day data...")
     yf_symbol = symbol.replace('.', '-')
     end_date = datetime.now().date()
-    start_date = end_date - timedelta(days=NINETY_DAYS)
+    start_date = end_date - timedelta(days=200)  # Fetch 200 days of data
     data = fetch_ohlc(symbol, start=start_date, end=end_date, interval='1d')
+    
     if data is None:
-        print(f"No 90-day data for {yf_symbol}.")
+        logging.error(f"No 200-day data for {yf_symbol}.")
+        print(f"No 200-day data for {yf_symbol}.")
         return
-    highs = data['High']
-    lows = data['Low']
+    
+    # Extract the most recent 90 days
+    days_to_analyze = NINETY_DAYS  # NINETY_DAYS = 90 as defined globally
+    highs = data['High'][-days_to_analyze:]  # Last 90 days
+    lows = data['Low'][-days_to_analyze:]    # Last 90 days
+    
+    if not highs or not lows:  # Check if lists are empty
+        logging.error(f"Empty high/low data for {yf_symbol} in the last 90 days.")
+        print(f"Empty high/low data for {yf_symbol} in the last 90 days.")
+        return
+    
     ninetydays_highlow[symbol] = {
         'highs': highs,
         'lows': lows,
         'min_low': min(lows),
         'max_high': max(highs)
     }
-    print(f"Updated 90-day data for {symbol}: min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
-    return
+    print(f"Updated 90-day data for {symbol} (from 200-day fetch): min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
 
 def get_90day_min_low(symbol):
     """
