@@ -984,8 +984,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print("No bullish candlestick pattern detected.")
         rsi = talib.RSI(close, timeperiod=14)
         latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else None
-        rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED
-        print(f"Latest RSI: {rsi_color}{latest_rsi:.2f if latest_rsi else 'N/A'}{RESET}")
+        rsi_color = GREEN if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi >= 50 else RED if latest_rsi is not None and not np.isnan(latest_rsi) else YELLOW
+        rsi_display = f"{latest_rsi:.2f}" if latest_rsi is not None and not np.isnan(latest_rsi) else "N/A"
+        print(f"Latest RSI: {rsi_color}{rsi_display}{RESET}")
         if latest_rsi and latest_rsi < 50:
             score += 1
             print("RSI < 50: +1 score")
@@ -1022,7 +1023,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             prior_avg_rsi = 0
         rsi_color_recent = GREEN if recent_avg_rsi >= 50 else RED
         rsi_color_prior = GREEN if prior_avg_rsi >= 50 else RED
-        print(f"Latest RSI: {rsi_color if latest_rsi else YELLOW}{latest_rsi:.2f if latest_rsi else 'N/A'}{RESET}, Recent avg RSI: {rsi_color_recent}{recent_avg_rsi:.2f}{RESET}, Prior avg RSI: {rsi_color_prior}{prior_avg_rsi:.2f}{RESET}, RSI decrease: {rsi_decrease}")
+        rsi_display = f"{latest_rsi:.2f}" if latest_rsi is not None and not np.isnan(latest_rsi) else "N/A"
+        rsi_color = GREEN if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi >= 50 else RED if latest_rsi is not None and not np.isnan(latest_rsi) else YELLOW
+        print(f"Latest RSI: {rsi_color}{rsi_display}{RESET}, Recent avg RSI: {rsi_color_recent}{recent_avg_rsi:.2f}{RESET}, Prior avg RSI: {rsi_color_prior}{prior_avg_rsi:.2f}{RESET}, RSI decrease: {rsi_decrease}")
         print(f"Calculating MACD for {sym}...")
         short_window = 12
         long_window = 26
@@ -1491,3 +1494,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
