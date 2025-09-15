@@ -19,7 +19,6 @@ from sqlalchemy.orm.exc import NoResultFound
 from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
 import numpy as np
-import pandas as pd
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
 
@@ -126,6 +125,24 @@ Base.metadata.create_all(engine)
 # NYSE Calendar
 nyse_cal = mcal.get_calendar('NYSE')
 
+def fetch_ohlc(symbol, period='1d', interval='1d', start=None, end=None, prepost=False):
+    yf_symbol = symbol.replace('.', '-')
+    if start and end:
+        df = yf.download(yf_symbol, start=start, end=end, interval=interval, prepost=prepost)
+    else:
+        ticker = yf.Ticker(yf_symbol)
+        df = ticker.history(period=period, interval=interval, prepost=prepost)
+    if len(df) == 0:
+        return None
+    data = {
+        'Open': df['Open'].tolist(),
+        'High': df['High'].tolist(),
+        'Low': df['Low'].tolist(),
+        'Close': df['Close'].tolist(),
+        'Volume': df['Volume'].tolist() if 'Volume' in df.columns else [0] * len(df)
+    }
+    return data
+
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
@@ -150,22 +167,20 @@ def update_90day_highlow(symbol):
     yf_symbol = symbol.replace('.', '-')
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=NINETY_DAYS)
-    try:
-        data = yf.download(yf_symbol, start=start_date, end=end_date, interval='1d')
-        if data.empty:
-            print(f"No 90-day data for {yf_symbol}.")
-            return
-        highs = data['High'].tolist()
-        lows = data['Low'].tolist()
-        ninetydays_highlow[symbol] = {
-            'highs': highs,
-            'lows': lows,
-            'min_low': min(lows),
-            'max_high': max(highs)
-        }
-        print(f"Updated 90-day data for {symbol}: min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
-    except Exception as e:
-        logging.error(f"Error updating 90-day data for {yf_symbol}: {e}")
+    data = fetch_ohlc(symbol, start=start_date, end=end_date, interval='1d')
+    if data is None:
+        print(f"No 90-day data for {yf_symbol}.")
+        return
+    highs = data['High']
+    lows = data['Low']
+    ninetydays_highlow[symbol] = {
+        'highs': highs,
+        'lows': lows,
+        'min_low': min(lows),
+        'max_high': max(highs)
+    }
+    print(f"Updated 90-day data for {symbol}: min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
+    return
 
 def get_90day_min_low(symbol):
     """
@@ -187,19 +202,24 @@ def rank_symbols_by_90day_low(symbols_list):
     for sym in symbols_list:
         current_price = client_get_quote(sym)
         if current_price is None:
-            continue
-        min_low = get_90day_min_low(sym)
-        if min_low is None:
-            continue
-        ratio = current_price / min_low
+            ratio = float('inf')
+        else:
+            min_low = get_90day_min_low(sym)
+            if min_low is None:
+                ratio = float('inf')
+            else:
+                ratio = current_price / min_low
         ranked.append((sym, ratio))
     # Sort by ascending ratio (closest to low first)
     ranked.sort(key=lambda x: x[1])
     reordered_symbols = [sym for sym, _ in ranked]
     print(f"Reordered symbols: {reordered_symbols}")
     for sym, ratio in ranked:
-        ratio_color = GREEN if ratio <= 1.01 else YELLOW
-        print(f"{sym}: ratio to 90d low = {ratio_color}{ratio:.4f}{RESET}")
+        if ratio == float('inf'):
+            print(f"{sym}: no data available")
+        else:
+            ratio_color = GREEN if ratio <= 1.01 else YELLOW
+            print(f"{sym}: ratio to 90d low = {ratio_color}{ratio:.4f}{RESET}")
     return reordered_symbols
 
 def get_2_hour_intraday_data(symbol, interval='5m'):
@@ -210,24 +230,19 @@ def get_2_hour_intraday_data(symbol, interval='5m'):
     yf_symbol = symbol.replace('.', '-')
     end_time = datetime.now(eastern)
     start_time = end_time - timedelta(hours=2)
-    try:
-        data = yf.download(yf_symbol, start=start_time, end=end_time, interval=interval, prepost=True)
-        if not data.empty:
-            print(f"Retrieved {len(data)} candles for {yf_symbol} over 2 hours.")
-            return data
-        else:
-            print(f"No data returned for {yf_symbol}.")
-            return pd.DataFrame()
-    except Exception as e:
-        logging.error(f"Error fetching 2-hour data for {yf_symbol}: {e}")
-        return pd.DataFrame()
+    data = fetch_ohlc(symbol, start=start_time, end=end_time, interval=interval, prepost=True)
+    if data is None:
+        print(f"No data returned for {yf_symbol}.")
+        return {}
+    print(f"Retrieved {len(data['Close'])} candles for {yf_symbol} over 2 hours.")
+    return data
 
 def stop_if_stock_market_is_closed():
     while True:
         current_datetime = datetime.now(eastern)
         current_time_str = current_datetime.strftime("%A, %B %d, %Y, %I:%M:%S %p")
         schedule = nyse_cal.schedule(start_date=current_datetime.date(), end_date=current_datetime.date())
-        if not schedule.empty:
+        if len(schedule) > 0:
             market_open = schedule.iloc[0]['market_open'].astimezone(eastern)
             market_close = schedule.iloc[0]['market_close'].astimezone(eastern)
             pre_market_open = market_open - timedelta(hours=2)
@@ -298,13 +313,13 @@ def remove_symbols_from_trade_list(symbol):
 def get_opening_price(symbol):
     print(f"Fetching opening price for {symbol}...")
     yf_symbol = symbol.replace('.', '-')
-    stock_data = yf.Ticker(yf_symbol)
+    data = fetch_ohlc(yf_symbol, period="1d")
     try:
-        opening_price = round(float(stock_data.history(period="1d")["Open"].iloc[0]), 4)
+        opening_price = round(data['Open'][0], 4)
         price_color = GREEN if opening_price >= 0 else RED
         print(f"Opening price for {yf_symbol}: {price_color}${opening_price:.4f}{RESET}")
         return opening_price
-    except IndexError:
+    except (IndexError, KeyError):
         logging.error(f"Opening price not found for {yf_symbol}.")
         return None
 
@@ -374,13 +389,15 @@ def get_atr_low_price(symbol):
 def get_average_true_range(symbol):
     print(f"Calculating ATR for {symbol} using yfinance...")
     yf_symbol = symbol.replace('.', '-')
-    ticker = yf.Ticker(yf_symbol)
-    data = ticker.history(period='30d')
-    if data.empty:
+    data = fetch_ohlc(symbol, period='30d')
+    if data is None:
         logging.error(f"No data for {yf_symbol}.")
         return None
     try:
-        atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
+        high = np.array(data['High'])
+        low = np.array(data['Low'])
+        close = np.array(data['Close'])
+        atr = talib.ATR(high, low, close, timeperiod=22)
         atr_value = atr[-1]
         print(f"ATR value for {yf_symbol}: {atr_value:.4f}")
         return atr_value
@@ -393,12 +410,12 @@ def get_average_true_range(symbol):
 def is_in_uptrend(symbol):
     print(f"Checking if {symbol} is in uptrend using yfinance...")
     yf_symbol = symbol.replace('.', '-')
-    stock_data = yf.Ticker(yf_symbol)
-    historical_data = stock_data.history(period='200d')
-    if historical_data.empty or len(historical_data) < 200:
+    data = fetch_ohlc(symbol, period='200d')
+    if data is None or len(data['Close']) < 200:
         print(f"Insufficient data for {yf_symbol}.")
         return False
-    sma_200 = talib.SMA(historical_data['Close'].values, timeperiod=200)[-1]
+    close = np.array(data['Close'])
+    sma_200 = talib.SMA(close, timeperiod=200)[-1]
     current_price = client_get_quote(symbol)
     in_uptrend = current_price > sma_200 if current_price else False
     sma_color = GREEN if sma_200 >= 0 else RED
@@ -411,77 +428,96 @@ def is_in_uptrend(symbol):
 def get_daily_rsi(symbol):
     print(f"Calculating daily RSI for {symbol} using yfinance...")
     yf_symbol = symbol.replace('.', '-')
-    stock_data = yf.Ticker(yf_symbol)
-    historical_data = stock_data.history(period='30d', interval='1d')
-    if historical_data.empty:
+    data = fetch_ohlc(symbol, period='30d', interval='1d')
+    if data is None:
         print(f"No daily data for {yf_symbol}.")
         return None
-    rsi = talib.RSI(historical_data['Close'], timeperiod=14)[-1]
-    rsi_value = round(rsi, 2) if not np.isnan(rsi) else None
+    close = np.array(data['Close'])
+    rsi = talib.RSI(close, timeperiod=14)
+    rsi_value = round(rsi[-1], 2) if len(rsi) > 0 and not np.isnan(rsi[-1]) else None
     rsi_color = GREEN if rsi_value and rsi_value >= 50 else RED
     print(f"Daily RSI for {yf_symbol}: {rsi_color}{rsi_value}{RESET}")
     return rsi_value
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def calculate_technical_indicators(symbols, lookback_days=200):
-    print(f"Calculating technical indicators for {symbols} using yfinance...")
-    yf_symbol = symbols.replace('.', '-')
-    stock_data = yf.Ticker(yf_symbol)
-    
-    # Fetch 200 days of historical data
-    historical_data = stock_data.history(period='200d', interval='1d')
+def calculate_technical_indicators(symbol, lookback_days=200):
+    print(f"Calculating technical indicators for {symbol} using yfinance...")
+    data = fetch_ohlc(symbol, period=f'{lookback_days}d', interval='1d')
     
     # Check if data is sufficient
-    if historical_data.empty or len(historical_data) < 35:  # Minimum for MACD (26 + 9)
-        print(f"Insufficient historical data for {yf_symbol} (rows: {len(historical_data)}).")
-        logging.error(f"Insufficient historical data for {yf_symbol} (rows: {len(historical_data)}).")
-        return historical_data
+    if data is None or len(data['Close']) < 35:  # Minimum for MACD (26 + 9)
+        print(f"Insufficient historical data for {symbol} (rows: {len(data['Close']) if data else 0}).")
+        logging.error(f"Insufficient historical data for {symbol} (rows: {len(data['Close']) if data else 0}).")
+        return None
     
     # Ensure Close prices are clean (no NaN)
-    historical_data = historical_data.dropna(subset=['Close'])
+    clean_indices = [i for i, c in enumerate(data['Close']) if not np.isnan(c)]
+    if len(clean_indices) < 35:
+        print(f"After cleaning, insufficient data for {symbol} (rows: {len(clean_indices)}).")
+        logging.error(f"After cleaning, insufficient data for {symbol} (rows: {len(clean_indices)}).")
+        return None
     
-    if len(historical_data) < 35:
-        print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(historical_data)}).")
-        logging.error(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(historical_data)}).")
-        return historical_data
+    close = np.array([data['Close'][i] for i in clean_indices])
+    high = np.array([data['High'][i] for i in clean_indices])
+    low = np.array([data['Low'][i] for i in clean_indices])
+    volume = np.array([data['Volume'][i] for i in clean_indices])
     
     # Calculate MACD
     short_window = 12
     long_window = 26
     signal_window = 9
     try:
-        macd, signal, _ = talib.MACD(historical_data['Close'].values,
+        macd, signal, _ = talib.MACD(close,
                                      fastperiod=short_window,
                                      slowperiod=long_window,
                                      signalperiod=signal_window)
-        historical_data['macd'] = macd
-        historical_data['signal'] = signal
+        # Pad to original length
+        macd_full = np.full(len(data['Close']), np.nan)
+        signal_full = np.full(len(data['Close']), np.nan)
+        macd_full[clean_indices] = macd
+        signal_full[clean_indices] = signal
     except Exception as e:
-        print(f"Error calculating MACD for {yf_symbol}: {e}")
-        logging.error(f"Error calculating MACD for {yf_symbol}: {e}")
-        historical_data['macd'] = np.nan
-        historical_data['signal'] = np.nan
+        print(f"Error calculating MACD for {symbol}: {e}")
+        logging.error(f"Error calculating MACD for {symbol}: {e}")
+        macd_full = np.full(len(data['Close']), np.nan)
+        signal_full = np.full(len(data['Close']), np.nan)
     
     # Calculate RSI
     try:
-        rsi = talib.RSI(historical_data['Close'].values, timeperiod=14)
-        historical_data['rsi'] = rsi
+        rsi = talib.RSI(close, timeperiod=14)
+        rsi_full = np.full(len(data['Close']), np.nan)
+        rsi_full[clean_indices] = rsi
     except Exception as e:
-        print(f"Error calculating RSI for {yf_symbol}: {e}")
-        logging.error(f"Error calculating RSI for {yf_symbol}: {e}")
-        historical_data['rsi'] = np.nan
+        print(f"Error calculating RSI for {symbol}: {e}")
+        logging.error(f"Error calculating RSI for {symbol}: {e}")
+        rsi_full = np.full(len(data['Close']), np.nan)
     
-    historical_data['volume'] = historical_data['Volume']
-    print(f"Technical indicators calculated for {yf_symbol}.")
-    print_technical_indicators(symbols, historical_data)
+    historical_data = {
+        'Close': data['Close'],
+        'macd': macd_full,
+        'signal': signal_full,
+        'rsi': rsi_full,
+        'volume': data['Volume'],
+        'index': list(range(len(data['Close'])))
+    }
+    print(f"Technical indicators calculated for {symbol}.")
+    print_technical_indicators(symbol, historical_data)
     return historical_data
 
-def print_technical_indicators(symbols, historical_data):
-    print(f"\nTechnical Indicators for {symbols}:\n")
-    tail_data = historical_data[['Close', 'macd', 'signal', 'rsi', 'volume']].tail()
-    
-    for idx, row in tail_data.iterrows():
+def print_technical_indicators(symbol, historical_data):
+    print(f"\nTechnical Indicators for {symbol}:\n")
+    n_tail = 5
+    start_idx = max(0, len(historical_data['Close']) - n_tail)
+    for i in range(start_idx, len(historical_data['Close'])):
+        row = {
+            'Close': historical_data['Close'][i],
+            'macd': historical_data['macd'][i],
+            'signal': historical_data['signal'][i],
+            'rsi': historical_data['rsi'][i],
+            'volume': historical_data['volume'][i]
+        }
+        idx = historical_data['index'][i]
         close_color = GREEN if row['Close'] >= 0 else RED
         
         # Handle MACD and Signal
@@ -512,16 +548,16 @@ def print_technical_indicators(symbols, historical_data):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def calculate_rsi(symbols, period=14, interval='5m'):
-    print(f"Calculating RSI for {symbols} (period={period}, interval={interval}) using yfinance...")
-    yf_symbol = symbols.replace('.', '-')
-    stock_data = yf.Ticker(yf_symbol)
-    historical_data = stock_data.history(period='1d', interval=interval, prepost=True)
-    if historical_data.empty or len(historical_data['Close']) < period:
+def calculate_rsi(symbol, period=14, interval='5m'):
+    print(f"Calculating RSI for {symbol} (period={period}, interval={interval}) using yfinance...")
+    yf_symbol = symbol.replace('.', '-')
+    data = fetch_ohlc(symbol, period='1d', interval=interval, prepost=True)
+    if data is None or len(data['Close']) < period:
         logging.error(f"Insufficient data for RSI calculation for {yf_symbol}.")
         return None
-    rsi = talib.RSI(historical_data['Close'], timeperiod=period)
-    latest_rsi = round(rsi.iloc[-1], 2) if not rsi.empty else None
+    close = np.array(data['Close'])
+    rsi = talib.RSI(close, timeperiod=period)
+    latest_rsi = round(rsi[-1], 2) if len(rsi) > 0 and not np.isnan(rsi[-1]) else None
     rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED
     print(f"RSI for {yf_symbol}: {rsi_color}{latest_rsi}{RESET}")
     return latest_rsi
@@ -538,9 +574,9 @@ def get_last_price_within_past_5_minutes(symbols_to_buy_list):
         print(f"Fetching 5-minute price data for {symbol}...")
         try:
             yf_symbol = symbol.replace('.', '-')
-            data = yf.download(yf_symbol, start=start_time, end=end_time, interval='1m', prepost=True)
-            if not data.empty:
-                last_price = round(float(data['Close'].iloc[-1]), 2)
+            data = fetch_ohlc(symbol, start=start_time, end=end_time, interval='1m', prepost=True)
+            if data is not None and len(data['Close']) > 0:
+                last_price = round(data['Close'][-1], 2)
                 price_color = GREEN if last_price >= 0 else RED
                 print(f"Last price for {yf_symbol} within 5 minutes: {price_color}${last_price:.2f}{RESET}")
                 results[symbol] = last_price
@@ -994,7 +1030,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         # Update 90-day data if needed
         get_90day_min_low(sym)
         historical_data = calculate_technical_indicators(sym, lookback_days=200)
-        if historical_data.empty:
+        if historical_data is None:
             print(f"No historical data for {sym}. Skipping.")
             continue
         valid_symbols.append(sym)
@@ -1040,33 +1076,41 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         # Get historical data for volume, RSI, and candlesticks
         yf_symbol = sym.replace('.', '-')
         print(f"Fetching 20-day historical data for {yf_symbol}...")
-        df = yf.Ticker(yf_symbol).history(period="20d")
-        if df.empty or len(df) < 3:
-            print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
+        df = fetch_ohlc(yf_symbol, period="20d")
+        if df is None or len(df['Close']) < 3:
+            print(f"Insufficient historical data for {sym} (rows: {len(df['Close']) if df else 0}). Skipping.")
             continue
 
         # Fetch 2-hour intraday data for improved reversal detection
         intraday_df = get_2_hour_intraday_data(sym, interval='5m')
-        if intraday_df.empty or len(intraday_df) < 3:
+        if intraday_df is None or len(intraday_df['Close']) < 3:
             print(f"Insufficient 2-hour intraday data for {sym}. Falling back to daily.")
             use_intraday = False
         else:
-            print(f"Using 2-hour intraday data ({len(intraday_df)} candles) for {sym}.")
+            print(f"Using 2-hour intraday data ({len(intraday_df['Close'])} candles) for {sym}.")
             use_intraday = True
 
         # --- Score calculation ---
         score = 0
         if use_intraday:
-            close = intraday_df['Close'].values
-            open_ = intraday_df['Open'].values
-            high = intraday_df['High'].values
-            low = intraday_df['Low'].values
+            close_list = intraday_df['Close']
+            open_list = intraday_df['Open']
+            high_list = intraday_df['High']
+            low_list = intraday_df['Low']
+            close = np.array(close_list)
+            open_ = np.array(open_list)
+            high = np.array(high_list)
+            low = np.array(low_list)
             lookback_candles = min(10, len(close))  # Check last 10 candles for patterns in 2 hours
         else:
-            close = df['Close'].values
-            open_ = df['Open'].values
-            high = df['High'].values
-            low = df['Low'].values
+            close_list = df['Close']
+            open_list = df['Open']
+            high_list = df['High']
+            low_list = df['Low']
+            close = np.array(close_list)
+            open_ = np.array(open_list)
+            high = np.array(high_list)
+            low = np.array(low_list)
             lookback_candles = min(20, len(close))
 
         # Candlestick bullish reversal patterns (improved with intraday)
@@ -1114,12 +1158,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
 
         # Calculate volume decrease (using intraday)
         if use_intraday:
-            recent_avg_volume = intraday_df['Volume'].tail(5).mean() if len(intraday_df) >= 5 else 0
-            prior_avg_volume = intraday_df['Volume'].tail(10).head(5).mean() if len(intraday_df) >= 10 else recent_avg_volume
+            recent_avg_volume = np.mean(intraday_df['Volume'][-5:]) if len(intraday_df['Volume']) >= 5 else 0
+            prior_avg_volume = np.mean(intraday_df['Volume'][-10:-5]) if len(intraday_df['Volume']) >= 10 else recent_avg_volume
         else:
-            recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
-            prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
-        volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
+            recent_avg_volume = np.mean(df['Volume'][-5:]) if len(df['Volume']) >= 5 else 0
+            prior_avg_volume = np.mean(df['Volume'][-10:-5]) if len(df['Volume']) >= 10 else recent_avg_volume
+        volume_decrease = recent_avg_volume < prior_avg_volume if len(df['Volume']) >= 10 else False
         print(f"Recent avg volume: {recent_avg_volume:.0f}, Prior avg volume: {prior_avg_volume:.0f}, Volume decrease: {volume_decrease}")
 
         # Calculate RSI decrease (using intraday)
@@ -1168,7 +1212,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         # Check price drop from 2-hour high
         print(f"Checking price drop for {sym} using 2-hour history...")
         if use_intraday:
-            session_high = intraday_df['High'].max()
+            session_high = max(intraday_df['High'])
             drop_percent = (session_high - current_price) / session_high * 100
             price_decline = drop_percent >= 0.2
             high_color = GREEN if session_high >= 0 else RED
@@ -1179,7 +1223,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             last_price = last_prices.get(sym)
             if last_price is None:
                 try:
-                    last_price = round(float(df['Close'].iloc[-1]), 4)
+                    last_price = round(df['Close'][-1], 4)
                     last_color = GREEN if last_price >= 0 else RED
                     print(f"No price found in past 5 minutes. Using last closing price: {last_color}${last_price:.4f}{RESET}")
                 except Exception as e:
