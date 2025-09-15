@@ -20,8 +20,6 @@ from requests.exceptions import HTTPError, ConnectionError, Timeout
 from ratelimit import limits, sleep_and_retry
 import numpy as np
 import pandas as pd
-from twilio.rest import Client
-from twilio.base.exceptions import TwilioRestException
 
 # ANSI color codes for terminal output
 GREEN = "\033[92m"
@@ -79,6 +77,10 @@ CACHE_EXPIRY = 120  # 2 minutes
 CALLS = 60
 PERIOD = 60
 
+# 90-day high/low tracking
+ninetydays_highlow = {}  # symbol -> {'highs': [list of highs], 'lows': [list of lows], 'min_low': float, 'max_high': float}
+NINETY_DAYS = 90
+
 # Timezone
 eastern = pytz.timezone('US/Eastern')
 
@@ -109,8 +111,6 @@ class Position(Base):
     quantity = Column(Float)
     avg_price = Column(Float)
     purchase_date = Column(String)
-    stop_order_id = Column(String, nullable=True)  # New: Track stop order
-    stop_price = Column(Float, nullable=True)     # New: Track stop price
 
 # Initialize SQLAlchemy
 engine = create_engine('sqlite:///trading_bot.db', connect_args={"check_same_thread": False})
@@ -137,6 +137,66 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
         data_cache[key] = {'timestamp': current_time, 'data': data}
         print(f"Cached {data_type} for {symbols}.")
         return data
+
+def update_90day_highlow(symbol):
+    """
+    Fetch and update 90-day daily high/low for the symbol.
+    """
+    print(f"Updating 90-day high/low for {symbol}...")
+    yf_symbol = symbol.replace('.', '-')
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=NINETY_DAYS)
+    try:
+        data = yf.download(yf_symbol, start=start_date, end=end_date, interval='1d')
+        if data.empty:
+            print(f"No 90-day data for {yf_symbol}.")
+            return
+        highs = data['High'].tolist()
+        lows = data['Low'].tolist()
+        ninetydays_highlow[symbol] = {
+            'highs': highs,
+            'lows': lows,
+            'min_low': min(lows),
+            'max_high': max(highs)
+        }
+        print(f"Updated 90-day data for {symbol}: min_low=${min(lows):.4f}, max_high=${max(highs):.4f}")
+    except Exception as e:
+        logging.error(f"Error updating 90-day data for {yf_symbol}: {e}")
+
+def get_90day_min_low(symbol):
+    """
+    Get the minimum low price over the past 90 days for the symbol.
+    """
+    if symbol not in ninetydays_highlow:
+        update_90day_highlow(symbol)
+    if symbol in ninetydays_highlow:
+        return ninetydays_highlow[symbol]['min_low']
+    return None
+
+def rank_symbols_by_90day_low(symbols_list):
+    """
+    Rank symbols by how close current price is to 90-day min low (ascending ratio).
+    Reorder the list to prioritize stocks at their lowest 90-day price.
+    """
+    print("Ranking symbols by 90-day low proximity...")
+    ranked = []
+    for sym in symbols_list:
+        current_price = client_get_quote(sym)
+        if current_price is None:
+            continue
+        min_low = get_90day_min_low(sym)
+        if min_low is None:
+            continue
+        ratio = current_price / min_low
+        ranked.append((sym, ratio))
+    # Sort by ascending ratio (closest to low first)
+    ranked.sort(key=lambda x: x[1])
+    reordered_symbols = [sym for sym, _ in ranked]
+    print(f"Reordered symbols: {reordered_symbols}")
+    for sym, ratio in ranked:
+        ratio_color = GREEN if ratio <= 1.01 else YELLOW
+        print(f"{sym}: ratio to 90d low = {ratio_color}{ratio:.4f}{RESET}")
+    return reordered_symbols
 
 def get_2_hour_intraday_data(symbol, interval='5m'):
     """
@@ -308,31 +368,27 @@ def get_atr_low_price(symbol):
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def get_average_true_range(symbol):
-    """
-    Calculate the Average True Range (ATR) for a given stock symbol.
-    """
     print(f"Calculating ATR for {symbol} using yfinance...")
-
-    def _fetch_atr(symbol):
-        yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
-        ticker = yf.Ticker(yf_symbol)
-        data = ticker.history(period='30d')
-        try:
-            atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
-            atr_value = atr[-1]
-            print(f"ATR value for {yf_symbol}: {atr_value:.4f}")
-            return atr_value
-        except Exception as e:
-            logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
-            return None
-
-    return get_cached_data(symbol, 'atr', _fetch_atr, symbol)
+    yf_symbol = symbol.replace('.', '-')
+    ticker = yf.Ticker(yf_symbol)
+    data = ticker.history(period='30d')
+    if data.empty:
+        logging.error(f"No data for {yf_symbol}.")
+        return None
+    try:
+        atr = talib.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=22)
+        atr_value = atr[-1]
+        print(f"ATR value for {yf_symbol}: {atr_value:.4f}")
+        return atr_value
+    except Exception as e:
+        logging.error(f"Error calculating ATR for {yf_symbol}: {e}")
+        return None
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def is_in_uptrend(symbol):
     print(f"Checking if {symbol} is in uptrend using yfinance...")
-    yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
+    yf_symbol = symbol.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='200d')
     if historical_data.empty or len(historical_data) < 200:
@@ -350,7 +406,7 @@ def is_in_uptrend(symbol):
 @limits(calls=CALLS, period=PERIOD)
 def get_daily_rsi(symbol):
     print(f"Calculating daily RSI for {symbol} using yfinance...")
-    yf_symbol = symbol.replace('.', '-')  # Adjust for yfinance compatibility
+    yf_symbol = symbol.replace('.', '-')
     stock_data = yf.Ticker(yf_symbol)
     historical_data = stock_data.history(period='30d', interval='1d')
     if historical_data.empty:
@@ -606,70 +662,6 @@ def client_list_positions():
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def client_list_open_orders():
-    try:
-        if not account_id:
-            logging.error("No BROKERAGE accountId")
-            return []
-        url = f"{BASE_URL}/trading/{account_id}/orders"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        orders = resp.json().get('orders', [])
-        open_orders = [o for o in orders if o.get('status') == 'OPEN']
-        print(f"Retrieved {len(open_orders)} open orders.")
-        return open_orders
-    except Exception as e:
-        logging.error(f"Error listing open orders: {e}")
-        return []
-
-def get_open_orders_for_symbol(symbol):
-    open_orders = client_list_open_orders()
-    return [o for o in open_orders if o.get('instrument', {}).get('symbol') == symbol]
-
-def ensure_no_open_orders(symbol):
-    print(f"Checking for open orders for {symbol} before placing new order...")
-    open_orders = get_open_orders_for_symbol(symbol)
-    if not open_orders:
-        print(f"No open orders found for {symbol}.")
-        return True
-
-    print(f"Found {len(open_orders)} open orders for {symbol}. Initiating cancellation process...")
-    while open_orders:
-        print(f"Cancelling {len(open_orders)} open orders for {symbol}...")
-        for order in open_orders:
-            order_id = order.get('orderId')
-            if client_cancel_order(order_id):
-                print(f"Cancelled order {order_id} for {symbol}.")
-            else:
-                print(f"Failed to cancel order {order_id} for {symbol}.")
-        print("Waiting 60 seconds for cancellations to process...")
-        time.sleep(60)
-        print("Checking status every 30 seconds until all cancelled...")
-        while True:
-            time.sleep(30)
-            open_orders = get_open_orders_for_symbol(symbol)
-            if not open_orders:
-                print("All open orders for {symbol} have been cancelled.")
-                break
-            print(f"Still {len(open_orders)} open orders for {symbol}. Cancelling again...")
-            for order in open_orders:
-                order_id = order.get('orderId')
-                client_cancel_order(order_id)
-    print("Waiting 30 seconds for final confirmation...")
-    time.sleep(30)
-    open_orders = get_open_orders_for_symbol(symbol)
-    if open_orders:
-        print(f"Warning: Still {len(open_orders)} open orders for {symbol} after final check. Cancelling one more time...")
-        for order in open_orders:
-            order_id = order.get('orderId')
-            client_cancel_order(order_id)
-        time.sleep(30)  # Brief wait after final cancellation
-    else:
-        print(f"Confirmed: No open orders for {symbol}.")
-    return True
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
 def client_place_order(symbol, qty, side, order_type="MARKET", limit_price=None, stop_price=None):
     try:
         if not account_id:
@@ -786,117 +778,6 @@ def poll_order_status(order_id, timeout=60):
         time.sleep(2)
     return None
 
-def send_alert(message, subject="Trading Bot Alert", use_sms=False):
-    logging.info(f"Alert: {subject} - {message}")
-    print(f"{YELLOW}ALERT: {subject} - {message}{RESET}")
-
-    if use_sms and os.getenv("TWILIO_SID") and os.getenv("TWILIO_TOKEN"):
-        try:
-            client = Client(os.getenv("TWILIO_SID"), os.getenv("TWILIO_TOKEN"))
-            client.messages.create(
-                body=f"{subject}: {message}",
-                from_=os.getenv("TWILIO_PHONE"),
-                to=os.getenv("ALERT_PHONE")
-            )
-            print(f"SMS alert sent: {subject}")
-        except TwilioRestException as e:
-            logging.error(f"Failed to send SMS alert: {e}")
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def place_stop_loss_order(symbol, qty, current_price, atr_multiplier=2.0):
-    try:
-        atr = get_average_true_range(symbol)
-        if atr is None:
-            logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
-            return None, None
-        stop_price = round(current_price * (1 - atr_multiplier * atr / current_price), 2)
-        stop_color = GREEN if stop_price >= 0 else RED
-        if float(qty) != int(qty) and not FRACTIONAL_BUY_ORDERS:
-            logging.error(f"Skipped stop-loss for {symbol}: Fractional qty {qty:.4f} not allowed.")
-            return None, None
-        order_id = client_place_order(symbol, int(qty) if not FRACTIONAL_BUY_ORDERS else qty,
-                                     "SELL", order_type="STOP_MARKET", stop_price=stop_price)
-        if order_id:
-            print(f"Placed stop-loss order for {qty:.4f} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
-            logging.info(f"Placed stop-loss for {qty:.4f} shares of {symbol} at {stop_price:.2f}, Order ID: {order_id}")
-            return order_id, stop_price
-        return None, None
-    except Exception as e:
-        logging.error(f"Error placing stop-loss for {symbol}: {e}")
-        return None, None
-
-def monitor_stop_losses():
-    print("Monitoring stop-loss orders...")
-    session = SessionLocal()
-    try:
-        positions = session.query(Position).filter(Position.stop_order_id != None).all()
-        for pos in positions:
-            symbol = pos.symbols
-            current_price = client_get_quote(symbol)
-            if current_price is None:
-                continue
-            # If price rises 1% above avg_price, tighten stop to lock in some profit
-            if current_price >= pos.avg_price * 1.01:
-                new_stop_price = round(current_price * 0.99, 2)  # New stop at -1% current
-                if new_stop_price > pos.stop_price:  # Only tighten (raise) stop
-                    print(f"Tightening stop for {symbol}: Old={pos.stop_price:.2f}, New={new_stop_price:.2f}")
-                    # Cancel old stop
-                    if pos.stop_order_id and client_cancel_order(pos.stop_order_id):
-                        print(f"Cancelled old stop order {pos.stop_order_id} for {symbol}")
-                    # Place new stop
-                    new_order_id, new_stop_price = place_stop_loss_order(symbol, pos.quantity, current_price, atr_multiplier=1.0)
-                    if new_order_id:
-                        pos.stop_order_id = new_order_id
-                        pos.stop_price = new_stop_price
-                        session.commit()
-    except Exception as e:
-        logging.error(f"Error monitoring stop-losses: {e}")
-    finally:
-        session.close()
-
-def check_stop_order_status():
-    session = SessionLocal()
-    try:
-        positions = session.query(Position).filter(Position.stop_order_id != None).all()
-        for pos in positions:
-            status_info = client_get_order_status(pos.stop_order_id)
-            if status_info and status_info["status"] == "FILLED":
-                send_alert(
-                    f"Stop-loss triggered for {pos.symbols}: {pos.quantity:.4f} shares sold at ${status_info['avg_price']:.2f}",
-                    subject=f"Stop-Loss Triggered: {pos.symbols}",
-                    use_sms=True
-                )
-                # Clear stop order from DB
-                pos.stop_order_id = None
-                pos.stop_price = None
-                session.commit()
-    except Exception as e:
-        logging.error(f"Error checking stop orders: {e}")
-    finally:
-        session.close()
-
-def check_price_moves():
-    session = SessionLocal()
-    try:
-        positions = session.query(Position).all()
-        for pos in positions:
-            current_price = client_get_quote(pos.symbols)
-            if current_price is None:
-                continue
-            pct_change = (current_price - pos.avg_price) / pos.avg_price * 100
-            if abs(pct_change) >= 5:
-                direction = "up" if pct_change > 0 else "down"
-                send_alert(
-                    f"{pos.symbols} moved {pct_change:.2f}% {direction} from avg ${pos.avg_price:.2f} to ${current_price:.2f}",
-                    subject=f"Price Alert: {pos.symbols}",
-                    use_sms=True
-                )
-    except Exception as e:
-        logging.error(f"Error checking price moves: {e}")
-    finally:
-        session.close()
-
 def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
     print("Starting buy_stocks function...")
     global price_history, last_stored
@@ -904,6 +785,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print("No symbols to buy.")
         logging.info("No symbols to buy.")
         return
+    # Rank symbols by 90-day low proximity
+    ranked_symbols = rank_symbols_by_90day_low(symbols_to_buy_list)
+    if not ranked_symbols:
+        print("No symbols after ranking.")
+        return
+    symbols_to_buy_list = ranked_symbols  # Use reordered list
     symbols_to_remove = []
     buy_signal = 0
     acc = client_get_account()
@@ -925,6 +812,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         if current_price is None:
             print(f"No valid price data for {sym}. Skipping.")
             continue
+        # Update 90-day data if needed
+        get_90day_min_low(sym)
         historical_data = calculate_technical_indicators(sym, lookback_days=200)
         if historical_data.empty:
             print(f"No historical data for {sym}. Skipping.")
@@ -951,6 +840,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             continue
         current_color = GREEN if current_price >= 0 else RED
         print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
+
+        # Check if at 90-day low (optional filter, but since ranked, proceed)
+        min_low = get_90day_min_low(sym)
+        if min_low and current_price > min_low * 1.01:
+            print(f"{sym}: Not sufficiently close to 90-day low (${min_low:.4f}). Skipping for stricter filter.")
+            continue
 
         # Update price history for the symbol at specified intervals (now includes 120min)
         current_timestamp = time.time()
@@ -1339,66 +1234,37 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             reason = f"bullish reversal ({', '.join(detected_patterns)}), {specific_reason}"
             print(f"{GREEN}SUBMITTING BUY ORDER for {api_symbols} due to: {reason}{RESET}")
             try:
-                # Ensure no open orders before placing new buy order
-                if ensure_no_open_orders(api_symbols):
-                    # Ensure notional value is rounded to 2 decimal places
-                    total_cost_for_qty = round(total_cost_for_qty, 2)
-                    order_id = client_place_order(api_symbols, qty, "BUY")
-                    if order_id:
-                        print(f"Order submitted with ID: {order_id}")
-                        current_time_str = datetime.now(eastern).strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-                        status_info = poll_order_status(order_id)
-                        if status_info and status_info["status"] == "FILLED":
-                            filled_qty = status_info["filled_qty"]
-                            filled_price = status_info["avg_price"] or current_price
-                            actual_cost = filled_qty * filled_price
-                            filled_color = GREEN if filled_price >= 0 else RED
-                            print(f"{current_time_str}, {GREEN}ORDER FILLED{RESET} for {filled_qty:.4f} shares of {api_symbols} at {filled_color}${filled_price:.2f}{RESET}, actual cost: ${actual_cost:.2f}")
-                            logging.info(f"{current_time_str} Order filled for {filled_qty:.4f} shares of {api_symbols}, actual cost: ${actual_cost:.2f}")
+                # Ensure notional value is rounded to 2 decimal places
+                total_cost_for_qty = round(total_cost_for_qty, 2)
+                order_id = client_place_order(api_symbols, qty, "BUY")
+                if order_id:
+                    print(f"Order submitted with ID: {order_id}")
+                    current_time_str = datetime.now(eastern).strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+                    status_info = poll_order_status(order_id)
+                    if status_info and status_info["status"] == "FILLED":
+                        filled_qty = status_info["filled_qty"]
+                        filled_price = status_info["avg_price"] or current_price
+                        actual_cost = filled_qty * filled_price
+                        filled_color = GREEN if filled_price >= 0 else RED
+                        print(f"{current_time_str}, {GREEN}ORDER FILLED{RESET} for {filled_qty:.4f} shares of {api_symbols} at {filled_color}${filled_price:.2f}{RESET}, actual cost: ${actual_cost:.2f}")
+                        logging.info(f"{current_time_str} Order filled for {filled_qty:.4f} shares of {api_symbols}, actual cost: ${actual_cost:.2f}")
 
-                            # Place stop-loss order
-                            stop_order_id, stop_price = place_stop_loss_order(api_symbols, filled_qty, filled_price)
-                            if stop_order_id:
-                                # Update Position in DB with stop-loss details
-                                with buy_sell_lock:
-                                    session = SessionLocal()
-                                    try:
-                                        db_position = session.query(Position).filter_by(symbols=api_symbols).one_or_none()
-                                        if db_position:
-                                            db_position.stop_order_id = stop_order_id
-                                            db_position.stop_price = stop_price
-                                        else:
-                                            db_position = Position(symbols=api_symbols, quantity=filled_qty, avg_price=filled_price,
-                                                                  purchase_date=today_date_str, stop_order_id=stop_order_id, stop_price=stop_price)
-                                            session.add(db_position)
-                                        session.commit()
-                                    except SQLAlchemyError as e:
-                                        session.rollback()
-                                        logging.error(f"Error updating stop-loss in DB for {api_symbols}: {e}")
-                                    finally:
-                                        session.close()
-
-                            # Record CSV
-                            with open(csv_filename, mode='a', newline='') as csv_file:
-                                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                                csv_writer.writerow({
-                                    'Date': current_time_str,
-                                    'Buy': 'Buy',
-                                    'Sell': '',
-                                    'Quantity': filled_qty,
-                                    'Symbol': api_symbols,
-                                    'Price Per Share': filled_price
-                                })
-                            symbols_to_remove.append((api_symbols, filled_price, today_date_str))
-                            send_alert(
-                                f"Buy order filled: {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}",
-                                subject=f"Buy Filled: {api_symbols}",
-                                use_sms=True
-                            )
-                            # Skip trailing stop for now as not directly supported; can implement manual monitoring
-                        else:
-                            print(f"{RED}Buy order not filled for {api_symbols}{RESET}")
-                            logging.info(f"{current_time_str} Buy order not filled for {api_symbols}")
+                        # Record CSV
+                        with open(csv_filename, mode='a', newline='') as csv_file:
+                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                            csv_writer.writerow({
+                                'Date': current_time_str,
+                                'Buy': 'Buy',
+                                'Sell': '',
+                                'Quantity': filled_qty,
+                                'Symbol': api_symbols,
+                                'Price Per Share': filled_price
+                            })
+                        symbols_to_remove.append((api_symbols, filled_price, today_date_str))
+                        # Skip trailing stop for now as not directly supported; can implement manual monitoring
+                    else:
+                        print(f"{RED}Buy order not filled for {api_symbols}{RESET}")
+                        logging.info(f"{current_time_str} Buy order not filled for {api_symbols}")
 
             except Exception as e:
                 print(f"{RED}Error submitting buy order for {api_symbols}: {e}{RESET}")
@@ -1438,6 +1304,28 @@ def refresh_after_buy():
     symbols_to_buy = get_symbols_to_buy()
     symbols_to_sell_dict = update_symbols_to_sell_from_api()
     print("Refresh complete.")
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def place_trailing_stop_sell_order(symbol, qty, current_price):
+    # Public.com may not support trailing stops directly; approximate with stop market order
+    # For now, place a stop market sell at 1% below current
+    stop_loss_percent = 1.0
+    stop_price = current_price * (1 - stop_loss_percent / 100)
+    stop_color = GREEN if stop_price >= 0 else RED
+    try:
+        if float(qty) != int(qty):
+            logging.error(f"Skipped trailing stop for {symbol}: Fractional quantity {qty:.4f} not allowed.")
+            return None
+        order_id = client_place_order(symbol, int(qty), "SELL", order_type="STOP_MARKET", stop_price=stop_price)
+        if order_id:
+            print(f"Placed stop market sell order for {qty} shares of {symbol} at stop price {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
+            logging.info(f"Placed stop market sell order for {qty} shares of {symbol} at stop price {stop_price:.2f}, Order ID: {order_id}")
+            return order_id
+        return None
+    except Exception as e:
+        logging.error(f"Error placing stop order for {symbol}: {e}")
+        return None
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -1539,39 +1427,32 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
 
                 if current_price >= sell_threshold:
                     print(f"{GREEN}SELL CONDITION MET: Current price >= threshold{RESET}")
-                    # Ensure no open orders before placing new sell order
-                    if ensure_no_open_orders(symbol):
-                        order_id = client_place_order(symbol, qty, "SELL")
-                        if order_id:
-                            status_info = poll_order_status(order_id)
-                            if status_info and status_info["status"] == "FILLED":
-                                filled_qty = status_info["filled_qty"]
-                                filled_price = status_info["avg_price"] or current_price
-                                filled_color = GREEN if filled_price >= 0 else RED
-                                profit = filled_price - bought_price
-                                profit_color = GREEN if profit >= 0 else RED
-                                print(f" {current_time_str}, {GREEN}SOLD{RESET} {filled_qty:.4f} shares of {symbol} at {filled_color}${filled_price:.2f}{RESET} (profit: {profit_color}${profit:.2f}{RESET})")
-                                logging.info(f"{current_time_str} Sold {filled_qty:.4f} shares of {symbol} at {filled_price:.2f}.")
+                    order_id = client_place_order(symbol, qty, "SELL")
+                    if order_id:
+                        status_info = poll_order_status(order_id)
+                        if status_info and status_info["status"] == "FILLED":
+                            filled_qty = status_info["filled_qty"]
+                            filled_price = status_info["avg_price"] or current_price
+                            filled_color = GREEN if filled_price >= 0 else RED
+                            profit = filled_price - bought_price
+                            profit_color = GREEN if profit >= 0 else RED
+                            print(f" {current_time_str}, {GREEN}SOLD{RESET} {filled_qty:.4f} shares of {symbol} at {filled_color}${filled_price:.2f}{RESET} (profit: {profit_color}${profit:.2f}{RESET})")
+                            logging.info(f"{current_time_str} Sold {filled_qty:.4f} shares of {symbol} at {filled_price:.2f}.")
 
-                                with open(csv_filename, mode='a', newline='') as csv_file:
-                                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                                    csv_writer.writerow({
-                                        'Date': current_time_str,
-                                        'Buy': '',
-                                        'Sell': 'Sell',
-                                        'Quantity': filled_qty,
-                                        'Symbol': symbol,
-                                        'Price Per Share': filled_price
-                                    })
-                                symbols_to_remove.append((symbol, filled_qty, filled_price))
-                                send_alert(
-                                    f"Sell order filled: {filled_qty:.4f} shares of {symbol} at ${filled_price:.2f}, Profit: ${profit:.2f}",
-                                    subject=f"Sell Filled: {symbol}",
-                                    use_sms=True
-                                )
-                            else:
-                                print(f"{RED}Sell order not filled for {symbol}{RESET}")
-                                client_cancel_order(order_id)
+                            with open(csv_filename, mode='a', newline='') as csv_file:
+                                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                csv_writer.writerow({
+                                    'Date': current_time_str,
+                                    'Buy': '',
+                                    'Sell': 'Sell',
+                                    'Quantity': filled_qty,
+                                    'Symbol': symbol,
+                                    'Price Per Share': filled_price
+                                })
+                            symbols_to_remove.append((symbol, filled_qty, filled_price))
+                        else:
+                            print(f"{RED}Sell order not filled for {symbol}{RESET}")
+                            client_cancel_order(order_id)
                 else:
                     change = current_price - bought_price
                     change_color = GREEN if change >= 0 else RED
@@ -1658,11 +1539,6 @@ def main():
         print(f"{RED}Failed to fetch access token or account ID. Continuing anyway.{RESET}")
         logging.error("Failed to fetch access token or account ID. Continuing.")
 
-    # Schedule tasks
-    schedule.every(5).minutes.do(monitor_stop_losses)
-    schedule.every(2).minutes.do(check_stop_order_status)
-    schedule.every(5).minutes.do(check_price_moves)
-
     while True:
         try:
             stop_if_stock_market_is_closed()
@@ -1701,9 +1577,6 @@ def main():
             buy_thread.join()
             sell_thread.join()
             print("Buy and sell threads completed.")
-
-            # Run scheduled tasks
-            schedule.run_pending()
 
             if PRINT_SYMBOLS_TO_BUY:
                 print("\n")
@@ -1765,7 +1638,6 @@ def main():
             logging.info("Program terminated.")
             break
         except Exception as e:
-            send_alert(f"Critical error in main loop: {e}", subject="Bot Error", use_sms=True)
             print(f"{RED}Error in main loop: {e}{RESET}")
             logging.error(f"Main loop error: {e}")
             time.sleep(120)  # Wait 2 minutes on error
