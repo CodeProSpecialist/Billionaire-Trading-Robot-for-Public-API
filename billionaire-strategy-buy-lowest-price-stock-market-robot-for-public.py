@@ -161,11 +161,48 @@ def stop_if_stock_market_is_closed():
             logging.info(f"{current_time_str}: Market closed today.")
             time.sleep(60)
 
+def sync_db_with_api():
+    print("Syncing database with API positions...")
+    session = SessionLocal()
+    try:
+        api_positions = client_list_positions()
+        for pos in api_positions:
+            symbol = pos['symbol']
+            qty = pos['qty']
+            avg_price = pos['avg_entry_price']
+            purchase_date = pos['purchase_date']
+            db_pos = session.query(Position).filter_by(symbols=symbol).first()
+            if db_pos:
+                db_pos.quantity = qty
+                db_pos.avg_price = avg_price
+                # Do not overwrite purchase_date unless it's a new position
+            else:
+                db_pos = Position(
+                    symbols=symbol,
+                    quantity=qty,
+                    avg_price=avg_price,
+                    purchase_date=purchase_date
+                )
+                session.add(db_pos)
+            # Cancel stop if qty == 0, but since API shows >0, skip
+        # Delete DB positions not in API
+        api_symbols = {pos['symbol'] for pos in api_positions}
+        for db_pos in session.query(Position).all():
+            if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
+                if db_pos.stop_order_id:
+                    client_cancel_order(db_pos.stop_order_id)
+                session.delete(db_pos)
+        session.commit()
+        print("Database synced with API.")
+    except Exception as e:
+        logging.error(f"Error syncing DB with API: {e}")
+    finally:
+        session.close()
+
 def print_database_tables():
     if PRINT_DATABASE:
         session = SessionLocal()
         try:
-            positions = client_list_positions()
             print("\nTrade History In This Robot's Database:")
             print("\nStock | Buy or Sell | Quantity | Avg. Price | Date")
             for record in session.query(TradeHistory).all():
@@ -207,6 +244,50 @@ def remove_symbols_from_trade_list(symbol):
         print(f"Removed {symbol} from trade list.")
     except Exception as e:
         logging.error(f"Error removing {symbol} from trade list: {e}")
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_last_price_within_past_5_minutes(symbols_to_buy_list):
+    print("Fetching last prices within past 5 minutes using yfinance...")
+    results = {}
+    for symbol in symbols_to_buy_list:
+        print(f"Fetching 5-minute price data for {symbol}...")
+        try:
+            yf_symbol = symbol.replace('.', '-')
+            data = yf.Ticker(yf_symbol).history(period="1d", interval='5m')
+            if not data.empty:
+                last_price = round(float(data['Close'].iloc[-1]), 4)
+                price_color = GREEN if last_price >= 0 else RED
+                print(f"Last price for {yf_symbol} within 5 minutes: {price_color}${last_price:.4f}{RESET}")
+                results[symbol] = last_price
+            else:
+                results[symbol] = None
+        except Exception as e:
+            logging.error(f"Error fetching 5-min data for {yf_symbol}: {e}")
+            results[symbol] = None
+    return results
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def get_last_price_within_past_5_days(symbols_to_buy_list):
+    print("Fetching last prices within past 5 days using yfinance...")
+    results = {}
+    for symbol in symbols_to_buy_list:
+        print(f"Fetching 5-day price data for {symbol}...")
+        try:
+            yf_symbol = symbol.replace('.', '-')
+            data = yf.Ticker(yf_symbol).history(period='5d', interval='1d')
+            if not data.empty:
+                last_price = round(float(data['Close'].iloc[-1]), 2)
+                price_color = GREEN if last_price >= 0 else RED
+                print(f"Last price for {yf_symbol} within 5 days: {price_color}${last_price:.2f}{RESET}")
+                results[symbol] = last_price
+            else:
+                results[symbol] = None
+        except Exception as e:
+            logging.error(f"Error fetching data for {yf_symbol}: {e}")
+            results[symbol] = None
+    return results
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -442,28 +523,6 @@ def calculate_rsi(symbols, period=14, interval='1d'):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def get_last_price_within_past_5_days(symbols_to_buy_list):
-    print("Fetching last prices within past 5 days using yfinance...")
-    results = {}
-    for symbol in symbols_to_buy_list:
-        print(f"Fetching 5-day price data for {symbol}...")
-        try:
-            yf_symbol = symbol.replace('.', '-')
-            data = yf.Ticker(yf_symbol).history(period='5d', interval='1d')
-            if not data.empty:
-                last_price = round(float(data['Close'].iloc[-1]), 2)
-                price_color = GREEN if last_price >= 0 else RED
-                print(f"Last price for {yf_symbol} within 5 days: {price_color}${last_price:.2f}{RESET}")
-                results[symbol] = last_price
-            else:
-                results[symbol] = None
-        except Exception as e:
-            logging.error(f"Error fetching data for {yf_symbol}: {e}")
-            results[symbol] = None
-    return results
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
 def get_most_recent_purchase_date(symbol):
     print(f"Retrieving most recent purchase date for {symbol}...")
     try:
@@ -515,6 +574,15 @@ def fetch_access_token_and_account_id():
     except Exception as e:
         logging.error(f"Error fetching token/account ID: {e}")
         return False
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def refresh_token_if_needed():
+    global last_token_fetch_time
+    if last_token_fetch_time and (datetime.now() - last_token_fetch_time) > timedelta(hours=23):
+        print("Refreshing access token...")
+        return fetch_access_token_and_account_id()
+    return True
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -772,13 +840,13 @@ def send_alert(message, subject="Trading Bot Alert", use_sms=False):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def place_stop_loss_order(symbol, qty, current_price, atr_multiplier=2.0):
+def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
     try:
         atr = get_average_true_range(symbol)
         if atr is None:
             logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
             return None, None
-        stop_price = round(current_price * (1 - atr_multiplier * atr / current_price), 2)
+        stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
         stop_color = GREEN if stop_price >= 0 else RED
         if float(qty) != int(qty) and not FRACTIONAL_BUY_ORDERS:
             logging.error(f"Skipped stop-loss for {symbol}: Fractional qty {qty:.4f} not allowed.")
@@ -824,17 +892,44 @@ def check_stop_order_status():
     session = SessionLocal()
     try:
         positions = session.query(Position).filter(Position.stop_order_id != None).all()
+        today_date_str = datetime.today().strftime("%Y-%m-%d")
         for pos in positions:
             status_info = client_get_order_status(pos.stop_order_id)
             if status_info and status_info["status"] == "FILLED":
+                filled_qty = status_info["filled_qty"]
+                filled_price = status_info["avg_price"] or client_get_quote(pos.symbols)
                 send_alert(
-                    f"Stop-loss triggered for {pos.symbols}: {pos.quantity:.4f} shares sold at ${status_info['avg_price']:.2f}",
+                    f"Stop-loss triggered for {pos.symbols}: {filled_qty:.4f} shares sold at ${filled_price:.2f}",
                     subject=f"Stop-Loss Triggered: {pos.symbols}",
                     use_sms=True
                 )
+                # Log sell to TradeHistory
+                trade = TradeHistory(
+                    symbols=pos.symbols,
+                    action='sell',
+                    quantity=filled_qty,
+                    price=filled_price,
+                    date=today_date_str
+                )
+                session.add(trade)
+                # Update position to zero and delete
+                pos.quantity = 0
                 pos.stop_order_id = None
                 pos.stop_price = None
+                session.delete(pos)
                 session.commit()
+                # CSV log
+                with open(csv_filename, mode='a', newline='') as csv_file:
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                    csv_writer.writerow({
+                        'Date': today_date_str,
+                        'Buy': 0,
+                        'Sell': filled_qty,
+                        'Quantity': filled_qty,
+                        'Symbol': pos.symbols,
+                        'Price Per Share': filled_price
+                    })
+                logging.info(f"Stop-loss sell recorded for {filled_qty:.4f} shares of {pos.symbols} at ${filled_price:.2f}")
     except Exception as e:
         logging.error(f"Error checking stop orders: {e}")
     finally:
@@ -899,6 +994,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print("No valid symbols to buy after filtering.")
         logging.info("No valid symbols to buy after filtering.")
         return
+    # Fetch 5-min and 5-day prices
+    min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
+    day_5_prices = get_last_price_within_past_5_days(valid_symbols)
     for sym in valid_symbols:
         print(f"\n{'='*60}")
         print(f"Processing {sym}...")
@@ -914,6 +1012,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             continue
         current_color = GREEN if current_price >= 0 else RED
         print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
+        # Compare 5-min vs 5-day
+        min_5_price = min_5_prices.get(sym)
+        day_5_price = day_5_prices.get(sym)
+        if min_5_price and day_5_price:
+            min_vs_day_change = ((min_5_price - day_5_price) / day_5_price * 100) if day_5_price else 0
+            change_color = GREEN if min_vs_day_change >= 0 else RED
+            print(f"5-min price: ${min_5_price:.4f} vs 5-day close: ${day_5_price:.2f} | Change: {change_color}{min_vs_day_change:.2f}%{RESET}")
         current_timestamp = time.time()
         if sym not in price_history:
             price_history[sym] = {interval: [] for interval in interval_map}
@@ -1053,15 +1158,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         price_increase = current_price > previous_price * 1.005
         print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
 
-        # Check price drop
+        # Check price drop - now using 5-min price
         print(f"Checking price drop for {sym}...")
-        last_prices = get_last_price_within_past_5_minutes([sym])
-        last_price = last_prices.get(sym)
+        last_price = min_5_prices.get(sym)
         if last_price is None:
             try:
                 last_price = round(float(df['Close'].iloc[-1].item()), 4)
-                print(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: {last_price}")
-                logging.info(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: {last_price}")
+                print(f"No 5-min price found for {yf_symbol}. Using last closing price: {last_price}")
+                logging.info(f"No 5-min price found for {yf_symbol}. Using last closing price: {last_price}")
             except Exception as e:
                 print(f"Error fetching last closing price for {yf_symbol}: {e}")
                 logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
@@ -1183,6 +1287,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             risk_amount = 0.02 * total_equity
             qty = risk_amount / risk_per_share if risk_per_share > 0 else 0
             total_cost_for_qty = qty * current_price
+            estimated_slippage = total_cost_for_qty * 0.001
+            total_cost_for_qty -= estimated_slippage  # Subtract slippage first
             with buy_sell_lock:
                 cash_available = client_get_account()['buying_power_cash']
                 cash_color = GREEN if cash_available >= 0 else RED
@@ -1193,9 +1299,6 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                     print(f"Insufficient risk-adjusted allocation for {yf_symbol}.")
                     continue
                 qty = round(total_cost_for_qty / current_price, 4)
-            estimated_slippage = total_cost_for_qty * 0.001
-            total_cost_for_qty -= estimated_slippage
-            qty = round(total_cost_for_qty / current_price, 4)
             cost_color = GREEN if total_cost_for_qty >= 0 else RED
             print(f"{yf_symbol}: Adjusted for slippage (0.1%): Notional = {cost_color}${total_cost_for_qty:.2f}{RESET}, Qty = {qty:.4f}")
         with buy_sell_lock:
@@ -1244,7 +1347,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                     total_cost = (position.quantity * position.avg_price) + (filled_qty * filled_price)
                                     position.avg_price = total_cost / total_qty if total_qty > 0 else position.avg_price
                                     position.quantity = total_qty
-                                    position.purchase_date = today_date_str
+                                    # Do not overwrite purchase_date on update
                                 else:
                                     position = Position(
                                         symbols=api_symbols,
@@ -1253,9 +1356,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                         purchase_date=today_date_str
                                     )
                                     session.add(position)
-                                order_id, stop_price = place_stop_loss_order(api_symbols, filled_qty, filled_price)
-                                if order_id:
-                                    position.stop_order_id = order_id
+                                # Place stop-loss for total quantity using avg_price
+                                order_id_stop, stop_price = place_stop_loss_order(api_symbols, position.quantity, position.avg_price)
+                                if order_id_stop:
+                                    position.stop_order_id = order_id_stop
                                     position.stop_price = stop_price
                                 session.commit()
                                 with open(csv_filename, mode='a', newline='') as csv_file:
@@ -1268,12 +1372,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                         'Symbol': api_symbols,
                                         'Price Per Share': filled_price
                                     })
-                                symbols_to_buy.append(api_symbols)
-                                print(f"Added {api_symbols} to buy list and recorded in CSV.")
+                                # Remove from file
+                                remove_symbols_from_trade_list(api_symbols)
                                 send_alert(
-                                f"Buy order filled: {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}",
-                                subject=f"Buy Filled: {api_symbols}",
-                                use_sms=True
+                                    f"Buy order filled: {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}",
+                                    subject=f"Buy Filled: {api_symbols}",
+                                    use_sms=True
                                 )    
                             except Exception as e:
                                 logging.error(f"Error updating database/CSV for {api_symbols}: {e}")
@@ -1388,7 +1492,8 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                             client_cancel_order(position.stop_order_id)
                                         session.delete(position)
                                     else:
-                                        position.purchase_date = today_date_str
+                                        # Do not update purchase_date on sell
+                                        pass
                                 session.commit()
                                 with open(csv_filename, mode='a', newline='') as csv_file:
                                     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1438,6 +1543,8 @@ def main():
     schedule.every(1).minutes.do(check_price_moves)
     schedule.every(5).minutes.do(check_stop_order_status)
     schedule.every(5).minutes.do(monitor_stop_losses)
+    schedule.every(5).minutes.do(sync_db_with_api)
+    schedule.every(420).minutes.do(refresh_token_if_needed)
     print("Scheduling tasks...")
     while True:
         try:
@@ -1454,4 +1561,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
