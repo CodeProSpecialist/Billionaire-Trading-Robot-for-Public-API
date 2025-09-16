@@ -914,9 +914,6 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             continue
         current_color = GREEN if current_price >= 0 else RED
         print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
-        if DEBUG:
-            print(f"Raw data for {sym}:")
-            print(f"Daily DataFrame:\n{df.tail()}")
         current_timestamp = time.time()
         if sym not in price_history:
             price_history[sym] = {interval: [] for interval in interval_map}
@@ -931,81 +928,98 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         df = yf.Ticker(yf_symbol).history(period="20d")
         if df.empty or len(df) < 3:
             print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
+            logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}).")
             continue
+        if DEBUG:
+            print(f"Raw data for {sym}:")
+            print(f"Daily DataFrame:\n{df.tail()}")
         # Clean data to remove NaN values
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
         if len(df) < 3:
             print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
+            logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}).")
             continue
+        # --- Score calculation ---
         score = 0
         close = df['Close'].values
         open_ = df['Open'].values
         high = df['High'].values
         low = df['Low'].values
         lookback_candles = min(20, len(close))
-        print("Analyzing candlestick patterns...")
-        bullish_patterns = [
-            talib.CDLHAMMER, talib.CDLENGULFING, talib.CDLMORNINGSTAR,
-            talib.CDLPIERCING, talib.CDL3WHITESOLDIERS, talib.CDLDRAGONFLYDOJI,
-            talib.CDLINVERTEDHAMMER, talib.CDLMATCHINGLOW
-        ]
-        pattern_detected = False
-        if len(open_) == len(high) == len(low) == len(close) and len(open_) >= 2:
-            valid_mask = ~np.isnan(open_) & ~np.isnan(high) & ~np.isnan(low) & ~np.isnan(close)
-            if valid_mask.sum() < 2:
-                print(f"Insufficient valid data for {sym} after removing NaN values. Skipping candlestick analysis.")
-                continue
-            open_valid = open_[valid_mask]
-            high_valid = high[valid_mask]
-            low_valid = low[valid_mask]
-            close_valid = close[valid_mask]
-            open_valid = np.array(open_valid, dtype=np.float64)
-            high_valid = np.array(high_valid, dtype=np.float64)
-            low_valid = np.array(low_valid, dtype=np.float64)
-            close_valid = np.array(close_valid, dtype=np.float64)
-            for f in bullish_patterns:
-                try:
-                    res = f(open_valid, high_valid, low_valid, close_valid)
-                    if len(res) > 0 and res[-1] > 0:
-                        pattern_name = f.__name__.replace('CDL', '').lower().replace('hammer', 'Hammer').replace('engulfing', 'Bullish Engulfing')
-                        print(f"Bullish pattern detected: {pattern_name} (value: {res[-1]})")
-                        score += 1
-                        pattern_detected = True
-                        break
-                except Exception as e:
-                    print(f"Error in candlestick pattern {f.__name__} for {sym}: {e}")
-                    logging.error(f"Error in candlestick pattern {f.__name__} for {sym}: {e}")
-                    continue
-        else:
-            print(f"Invalid input arrays for {sym}: Lengths (open={len(open_)}, high={len(high)}, low={len(close)}, close={len(close)}). Skipping candlestick analysis.")
-            logging.error(f"Invalid input arrays for {sym}: Lengths (open={len(open_)}, high={len(high)}, low={len(close)}, close={len(close)}).")
-            continue
-        if not pattern_detected:
-            print("No bullish candlestick pattern detected.")
+
+        # RSI decrease
         rsi = talib.RSI(close, timeperiod=14)
         latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else None
-        rsi_color = GREEN if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi >= 50 else RED if latest_rsi is not None and not np.isnan(latest_rsi) else YELLOW
-        rsi_display = f"{latest_rsi:.2f}" if latest_rsi is not None and not np.isnan(latest_rsi) else "N/A"
-        print(f"Latest RSI: {rsi_color}{rsi_display}{RESET}")
         if latest_rsi and latest_rsi < 50:
             score += 1
-            print("RSI < 50: +1 score")
-        recent_high = np.max(high[-lookback_candles:]) if len(high) >= lookback_candles else close[-1]
-        price_decrease_03 = close[-1] <= recent_high * 0.997
-        prev_high_color = GREEN if recent_high >= 0 else RED
-        curr_close_color = GREEN if close[-1] >= 0 else RED
-        print(f"Recent high (20-day lookback): {prev_high_color}${recent_high:.4f}{RESET}, Current close: {curr_close_color}${close[-1]:.4f}{RESET}")
-        if price_decrease_03:
-            print("Price decreased >= 0.3% from recent high: +1 score")
+            print(f"{yf_symbol}: RSI < 50 ({latest_rsi:.2f}): +1 score")
+        rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED if latest_rsi else YELLOW
+        print(f"Latest RSI: {rsi_color}{latest_rsi:.2f if latest_rsi else 'N/A'}{RESET}")
+
+        # Price decrease 0.3%
+        if close[-1] <= close[-2] * 0.997:
             score += 1
-        print(f"Initial score after basic checks: {score}")
+            print(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
+
+        # Detect bullish reversal candlestick patterns
+        print(f"Checking for bullish reversal patterns in {sym}...")
+        bullish_reversal_detected = False
+        reversal_candle_index = None
+        detected_patterns = []
+        patterns = {
+            'Hammer': talib.CDLHAMMER,
+            'Bullish Engulfing': talib.CDLENGULFING,
+            'Morning Star': talib.CDLMORNINGSTAR,
+            'Piercing Line': talib.CDLPIERCING,
+            'Three White Soldiers': talib.CDL3WHITESOLDIERS,
+            'Dragonfly Doji': talib.CDLDRAGONFLYDOJI,
+            'Inverted Hammer': talib.CDLINVERTEDHAMMER,
+            'Tweezer Bottom': talib.CDLMATCHINGLOW
+        }
+        valid_mask = ~np.isnan(open_) & ~np.isnan(high) & ~np.isnan(low) & ~np.isnan(close)
+        if valid_mask.sum() < 2:
+            print(f"Insufficient valid data for {sym} after removing NaN values. Skipping candlestick analysis.")
+            logging.info(f"Insufficient valid data for {sym} after removing NaN values.")
+            continue
+        open_valid = np.array(open_[valid_mask], dtype=np.float64)
+        high_valid = np.array(high[valid_mask], dtype=np.float64)
+        low_valid = np.array(low[valid_mask], dtype=np.float64)
+        close_valid = np.array(close[valid_mask], dtype=np.float64)
+        for i in range(-1, -lookback_candles, -1):
+            if abs(i) > len(open_valid):
+                continue
+            try:
+                for name, func in patterns.items():
+                    res = func(open_valid[:i + 1], high_valid[:i + 1], low_valid[:i + 1], close_valid[:i + 1])
+                    if res[-1] > 0:
+                        detected_patterns.append(name)
+                        bullish_reversal_detected = True
+                        reversal_candle_index = i
+                if bullish_reversal_detected:
+                    score += 1
+                    print(f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)} (+1 score)")
+                    logging.info(f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)}")
+                    break
+            except Exception as e:
+                print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                continue
+
         if score < 3:
             print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
+            logging.info(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
             continue
+
+        # Calculate volume decrease
+        print(f"Calculating volume metrics for {sym}...")
         recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
         prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
         volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
-        print(f"Recent avg volume (last 5 days): {recent_avg_volume:.0f}, Prior avg volume (prev 5 days): {prior_avg_volume:.0f}, Volume decrease: {volume_decrease}")
+        current_volume = df['Volume'].iloc[-1]
+        print(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
+
+        # Calculate RSI decrease
+        print(f"Calculating RSI metrics for {sym}...")
         rsi_series = talib.RSI(close, timeperiod=14)
         rsi_decrease = False
         if len(rsi_series) >= 10:
@@ -1021,196 +1035,137 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         else:
             recent_avg_rsi = 0
             prior_avg_rsi = 0
-        rsi_color_recent = GREEN if recent_avg_rsi >= 50 else RED
-        rsi_color_prior = GREEN if prior_avg_rsi >= 50 else RED
-        rsi_display = f"{latest_rsi:.2f}" if latest_rsi is not None and not np.isnan(latest_rsi) else "N/A"
-        rsi_color = GREEN if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi >= 50 else RED if latest_rsi is not None and not np.isnan(latest_rsi) else YELLOW
-        print(f"Latest RSI: {rsi_color}{rsi_display}{RESET}, Recent avg RSI: {rsi_color_recent}{recent_avg_rsi:.2f}{RESET}, Prior avg RSI: {rsi_color_prior}{prior_avg_rsi:.2f}{RESET}, RSI decrease: {rsi_decrease}")
+        print(f"{yf_symbol}: Latest RSI = {latest_rsi:.2f}, Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
+
+        # Calculate MACD
         print(f"Calculating MACD for {sym}...")
         short_window = 12
         long_window = 26
         signal_window = 9
-        macd, macd_signal, _ = talib.MACD(close, fastperiod=short_window, slowperiod=long_window,
-                                          signalperiod=signal_window)
-        latest_macd = round(macd[-1], 4) if len(macd) > 0 and not np.isnan(macd[-1]) else None
-        latest_macd_signal = round(macd_signal[-1], 4) if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
+        macd, macd_signal, _ = talib.MACD(close, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
+        latest_macd = macd[-1] if len(macd) > 0 and not np.isnan(macd[-1]) else None
+        latest_macd_signal = macd_signal[-1] if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
         macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None and latest_macd_signal is not None else False
-        macd_color = GREEN if latest_macd and latest_macd_signal and latest_macd > latest_macd_signal else RED
-        signal_color = GREEN if latest_macd_signal and latest_macd_signal >= 0 else RED
-        print(f"Latest MACD: {macd_color}{latest_macd:.4f if latest_macd else 'N/A'}{RESET}, Signal: {signal_color}{latest_macd_signal:.4f if latest_macd_signal else 'N/A'}{RESET}, MACD above signal: {macd_above_signal}")
+        print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal else 'N/A'}, MACD above signal = {macd_above_signal}")
+
+        # Check price increase (for logging)
         previous_price = get_previous_price(sym)
         price_increase = current_price > previous_price * 1.005
-        prev_color = GREEN if previous_price >= 0 else RED
-        curr_color = GREEN if current_price >= 0 else RED
-        change = current_price - previous_price
-        change_color = GREEN if change >= 0 else RED
-        print(f"Price check: Current = {curr_color}${current_price:.2f}{RESET}, Previous = {prev_color}${previous_price:.2f}{RESET}, Increase >0.5%: {price_increase} (change: {change_color}${change:.2f}{RESET})")
-        print(f"Checking price drop for {sym} using 5-day history...")
-        last_prices = get_last_price_within_past_5_days([sym])
+        print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
+
+        # Check price drop
+        print(f"Checking price drop for {sym}...")
+        last_prices = get_last_price_within_past_5_minutes([sym])
         last_price = last_prices.get(sym)
         if last_price is None:
             try:
-                last_price = round(float(df['Close'].iloc[-1]), 4)
-                last_color = GREEN if last_price >= 0 else RED
-                print(f"No price found in past 5 days. Using last closing price: {last_color}${last_price:.4f}{RESET}")
+                last_price = round(float(df['Close'].iloc[-1].item()), 4)
+                print(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: {last_price}")
+                logging.info(f"No price found for {yf_symbol} in past 5 minutes. Using last closing price: {last_price}")
             except Exception as e:
                 print(f"Error fetching last closing price for {yf_symbol}: {e}")
+                logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
                 continue
         price_decline_threshold = last_price * (1 - 0.002)
-        threshold_color = GREEN if price_decline_threshold >= 0 else RED
-        print(f"Price decline threshold (0.2% below last): {threshold_color}${price_decline_threshold:.4f}{RESET}")
         price_decline = current_price <= price_decline_threshold
-        print(f"Price decline detected: {price_decline} (Current: {curr_color}${current_price:.4f}{RESET} <= Threshold: {threshold_color}${price_decline_threshold:.4f}{RESET})")
+        print(f"{yf_symbol}: Price decline check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
+
+        # Calculate short-term price trend
         short_term_trend = None
-        if sym in price_history and '60min' in price_history[sym] and len(price_history[sym]['60min']) >= 2:
-            recent_prices = price_history[sym]['60min'][-2:]
+        if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
+            recent_prices = price_history[sym]['5min'][-2:]
             short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
-            trend_color = GREEN if short_term_trend == 'up' else RED
-            print(f"Short-term price trend (1hr): {trend_color}{short_term_trend}{RESET}")
-        print(f"Checking for bullish reversal patterns in {sym} using daily data...")
-        bullish_reversal_detected = False
-        reversal_candle_index = None
-        detected_patterns = []
-        ohlc_slice = slice(-lookback_candles, None)
-        for i in range(-1, -lookback_candles, -1):
-            if abs(i) > len(open_):
-                continue
-            try:
-                patterns = {
-                    'Hammer': talib.CDLHAMMER(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Bullish Engulfing': talib.CDLENGULFING(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] > 0,
-                    'Morning Star': talib.CDLMORNINGSTAR(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Piercing Line': talib.CDLPIERCING(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Three White Soldiers': talib.CDL3WHITESOLDIERS(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Dragonfly Doji': talib.CDLDRAGONFLYDOJI(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Inverted Hammer': talib.CDLINVERTEDHAMMER(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                    'Tweezer Bottom': talib.CDLMATCHINGLOW(open_[:i+1], high[:i+1], low[:i+1], close[:i+1])[-1] != 0,
-                }
-                current_detected = [name for name, detected in patterns.items() if detected]
-                if current_detected:
-                    bullish_reversal_detected = True
-                    detected_patterns = current_detected
-                    reversal_candle_index = i
-                    print(f"Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)}")
-                    break
-            except Exception as e:
-                print(f"IndexError in candlestick pattern detection for {yf_symbol}: {e}")
-                continue
-        if detected_patterns:
-            if sym in price_history and '60min' in price_history[sym]:
-                prices = price_history[sym]['60min']
-                print(f"{yf_symbol}: 1-hour price history: {prices[-5:]}")
+            print(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+            logging.info(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+
+        if detected_patterns and sym in price_history:
+            for interval, prices in price_history[sym].items():
+                if prices:
+                    print(f"{yf_symbol}: Price history at {interval}: {prices[-5:]}")
+                    logging.info(f"{yf_symbol}: Price history at {interval}: {prices[-5:]}")
         if price_decline:
-            print(f"{yf_symbol}: Price decline >= 0.2% from 5-day high detected (Current price = {curr_color}${current_price:.2f}{RESET})")
+            print(f"{yf_symbol}: Price decline >= 0.2% detected (Current price = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Threshold = ${price_decline_threshold:.2f})")
+            logging.info(f"{yf_symbol}: Price decline >= 0.2% detected (Current price = {current_price:.2f}, Threshold = {price_decline_threshold:.2f})")
         if volume_decrease:
             print(f"{yf_symbol}: Volume decrease detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
+            logging.info(f"{yf_symbol}: Volume decrease detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
         if rsi_decrease:
-            print(f"{yf_symbol}: RSI decrease detected (Recent avg = {rsi_color_recent}{recent_avg_rsi:.2f}{RESET}, Prior avg = {rsi_color_prior}{prior_avg_rsi:.2f}{RESET})")
-        uptrend = is_in_uptrend(sym)
-        if not uptrend:
+            print(f"{yf_symbol}: RSI decrease detected (Recent avg = {recent_avg_rsi:.2f}, Prior avg = {prior_avg_rsi:.2f})")
+            logging.info(f"{yf_symbol}: RSI decrease detected (Recent avg = {recent_avg_rsi:.2f}, Prior avg = {prior_avg_rsi:.2f})")
+
+        # Add trend filter
+        if not is_in_uptrend(sym):
             print(f"{yf_symbol}: Not in uptrend (below 200-day SMA). Skipping.")
+            logging.info(f"{yf_symbol}: Not in uptrend. Skipping.")
             continue
+
+        # Add multi-timeframe confirmation
         daily_rsi = get_daily_rsi(sym)
         if daily_rsi is None or daily_rsi > 50:
-            daily_rsi_color = GREEN if daily_rsi and daily_rsi >= 50 else RED
-            print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi_color}{daily_rsi if daily_rsi else 'N/A'}{RESET}). Skipping.")
+            print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
+            logging.info(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
             continue
+
+        # Pattern-specific buy conditions with scoring
         buy_conditions_met = False
         specific_reason = ""
         if bullish_reversal_detected:
-            print("Evaluating pattern-specific conditions with daily context...")
             score += 2
-            print(f"Base score for bullish reversal: {score}")
             price_stable = True
             if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
                 recent_prices = price_history[sym]['5min'][-2:]
-                stability = abs(recent_prices[-1] - recent_prices[-2]) / recent_prices[-2]
-                price_stable = stability < 0.005
-                stability_color = GREEN if price_stable else RED
-                print(f"Price stability check (5min): {stability_color}{price_stable}{RESET} (stability: {stability:.3f})")
+                price_stable = abs(recent_prices[-1] - recent_prices[-2]) / recent_prices[-2] < 0.005
+                print(f"{yf_symbol}: Price stability check (5min): {price_stable}")
+                logging.info(f"{yf_symbol}: Price stability check (5min): {price_stable}")
                 if price_stable:
                     score += 1
-                    print("Price stable: +1 score")
             if macd_above_signal:
-                print("MACD above signal: +1 score")
                 score += 1
             if not volume_decrease:
-                print("No volume decrease: +1 score")
                 score += 1
             if rsi_decrease:
-                print("RSI decrease: +1 score")
                 score += 1
             if price_decline:
-                print("Price decline from 5-day high: +1 score")
                 score += 1
-            print("Pattern-specific scoring:")
             for pattern in detected_patterns:
                 if pattern == 'Hammer':
-                    hammer_condition = latest_rsi < 35 and price_decline
-                    condition_met = "YES" if hammer_condition else "NO"
-                    color = GREEN if hammer_condition else RED
-                    print(f"  {pattern}: RSI <35 & decline >=0.2%: {color}{condition_met}{RESET} {'+1 score' if hammer_condition else ''}")
-                    if hammer_condition:
+                    decline_amount = (last_price - current_price) / last_price if last_price > 0 else 0
+                    if latest_rsi < 35 and decline_amount >= 0.003:
                         score += 1
                 elif pattern == 'Bullish Engulfing':
-                    engulfing_condition = recent_avg_volume > 1.5 * prior_avg_volume
-                    condition_met = "YES" if engulfing_condition else "NO"
-                    color = GREEN if engulfing_condition else RED
-                    print(f"  {pattern}: Volume >1.5x prior: {color}{condition_met}{RESET} {'+1 score' if engulfing_condition else ''}")
-                    if engulfing_condition:
+                    if recent_avg_volume > 1.5 * prior_avg_volume:
                         score += 1
                 elif pattern == 'Morning Star':
-                    morning_condition = latest_rsi < 40
-                    condition_met = "YES" if morning_condition else "NO"
-                    color = GREEN if morning_condition else RED
-                    print(f"  {pattern}: RSI <40: {color}{condition_met}{RESET} {'+1 score' if morning_condition else ''}")
-                    if morning_condition:
+                    if latest_rsi < 40:
                         score += 1
                 elif pattern == 'Piercing Line':
-                    piercing_condition = recent_avg_rsi < 40
-                    condition_met = "YES" if piercing_condition else "NO"
-                    color = GREEN if piercing_condition else RED
-                    print(f"  {pattern}: Recent RSI avg <40: {color}{condition_met}{RESET} {'+1 score' if piercing_condition else ''}")
-                    if piercing_condition:
+                    if recent_avg_rsi < 40:
                         score += 1
                 elif pattern == 'Three White Soldiers':
-                    soldiers_condition = not volume_decrease
-                    condition_met = "YES" if soldiers_condition else "NO"
-                    color = GREEN if soldiers_condition else RED
-                    print(f"  {pattern}: No volume decrease: {color}{condition_met}{RESET} {'+1 score' if soldiers_condition else ''}")
-                    if soldiers_condition:
+                    if not volume_decrease:
                         score += 1
                 elif pattern == 'Dragonfly Doji':
-                    doji_condition = latest_rsi < 30
-                    condition_met = "YES" if doji_condition else "NO"
-                    color = GREEN if doji_condition else RED
-                    print(f"  {pattern}: RSI <30: {color}{condition_met}{RESET} {'+1 score' if doji_condition else ''}")
-                    if doji_condition:
+                    if latest_rsi < 30:
                         score += 1
                 elif pattern == 'Inverted Hammer':
-                    hammer_condition = rsi_decrease
-                    condition_met = "YES" if hammer_condition else "NO"
-                    color = GREEN if hammer_condition else RED
-                    print(f"  {pattern}: RSI decrease: {color}{condition_met}{RESET} {'+1 score' if hammer_condition else ''}")
-                    if hammer_condition:
+                    if rsi_decrease:
                         score += 1
                 elif pattern == 'Tweezer Bottom':
-                    tweezer_condition = latest_rsi < 40
-                    condition_met = "YES" if tweezer_condition else "NO"
-                    color = GREEN if tweezer_condition else RED
-                    print(f"  {pattern}: RSI <40: {color}{condition_met}{RESET} {'+1 score' if tweezer_condition else ''}")
-                    if tweezer_condition:
+                    if latest_rsi < 40:
                         score += 1
-            print(f"Final buy score for {sym}: {score}")
-            if score >= 4:
+            if score >= 3:
                 buy_conditions_met = True
-                specific_reason = f"Score: {score}, patterns: {', '.join(detected_patterns)}, price decline: {price_decline}"
-                print(f"{GREEN}BUY CONDITIONS MET: {specific_reason}{RESET}")
+                specific_reason = f"Score: {score}, patterns: {', '.join(detected_patterns)}"
             else:
-                print(f"{RED}Buy score too low ({score} < 4). Skipping.{RESET}")
+                print(f"{yf_symbol}: Buy score too low ({score} < 3). Skipping.")
+                logging.info(f"{yf_symbol}: Buy score too low ({score} < 3). Skipping.")
+                continue
+
         if not buy_conditions_met:
-            print(f"{RED}No buy conditions met for {sym}. Skipping.{RESET}")
+            print(f"{yf_symbol}: No buy conditions met. Skipping.")
+            logging.info(f"{yf_symbol}: No buy conditions met. Skipping.")
             continue
+
         print(f"Calculating position size for {sym}...")
         filled_qty = 0
         filled_price = current_price
