@@ -1082,6 +1082,21 @@ def stop_if_stock_market_is_closed():
             logging.info(f"{current_time_str}: Market is closed today (holiday or weekend).")
             time.sleep(60)
 
+# Rate limit: 60 calls per minute for yfinance, 100 calls per minute for client_get_quote
+YF_CALLS_PER_MINUTE = 60
+CLIENT_CALLS_PER_MINUTE = 100
+ONE_MINUTE = 60
+
+@sleep_and_retry
+@limits(calls=CLIENT_CALLS_PER_MINUTE, period=ONE_MINUTE)
+def rate_limited_get_quote(sym):
+    return client_get_quote(sym)
+
+@sleep_and_retry
+@limits(calls=YF_CALLS_PER_MINUTE, period=ONE_MINUTE)
+def rate_limited_yf_history(sym, period="20d"):
+    return yf.Ticker(sym.replace('.', '-')).history(period=period)
+
 def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
     if task_running['buy_stocks']:
         print("buy_stocks already running. Skipping.")
@@ -1103,7 +1118,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print(f"Total account equity: ${total_equity:.2f}")
         logging.info(f"Total account equity: ${total_equity:.2f}")
         positions = client_list_positions()
-        current_exposure = sum(float(p['qty'] * (client_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
+        current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
         max_new_exposure = total_equity * 0.98 - current_exposure
         exposure_color = GREEN if max_new_exposure >= 0 else RED
         print(f"Current exposure: ${current_exposure:.2f}, Max new exposure: {exposure_color}${max_new_exposure:.2f}{RESET}")
@@ -1116,12 +1131,12 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         print("Filtering valid symbols for buying...")
         logging.info("Filtering valid symbols for buying")
         for sym in symbols_to_buy_list:
-            current_price = client_get_quote(sym)
+            current_price = rate_limited_get_quote(sym)
             if current_price is None:
                 print(f"No valid price data for {sym}. Skipping.")
                 logging.info(f"No valid price data for {sym}. Skipping")
                 continue
-            df = yf.Ticker(sym.replace('.', '-')).history(period="20d")
+            df = rate_limited_yf_history(sym)
             if df.empty or len(df) < 14:
                 print(f"Insufficient data for {sym} (daily rows: {len(df)}). Skipping.")
                 logging.info(f"Insufficient data for {sym} (daily rows: {len(df)}). Skipping")
@@ -1146,7 +1161,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
             print(f"Analysis time: {current_time_str}")
             logging.info(f"Analysis time: {current_time_str}")
-            current_price = client_get_quote(sym)
+            current_price = rate_limited_get_quote(sym)
             if current_price is None:
                 print(f"No valid price data for {sym}.")
                 logging.info(f"No valid price data for {sym}")
@@ -1176,7 +1191,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             yf_symbol = sym.replace('.', '-')
             print(f"Fetching 20-day historical data for {yf_symbol}...")
             logging.info(f"Fetching 20-day historical data for {yf_symbol}")
-            df = yf.Ticker(yf_symbol).history(period="20d")
+            df = rate_limited_yf_history(yf_symbol)
             if df.empty or len(df) < 14:
                 print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
                 logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping")
@@ -1192,6 +1207,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             high = df['High'].values
             low = df['Low'].values
             lookback_candles = min(20, len(close))
+            print(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
+            logging.info(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
             try:
                 rsi = talib.RSI(close, timeperiod=14)
                 latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
@@ -1297,12 +1314,33 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             short_window = 12
             long_window = 26
             signal_window = 9
-            macd, macd_signal, _ = talib.MACD(close, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
-            latest_macd = macd[-1] if len(macd) > 0 and not np.isnan(macd[-1]) else None
-            latest_macd_signal = macd_signal[-1] if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
-            macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None and latest_macd_signal is not None else False
-            print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
-            logging.info(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
+            latest_macd = None
+            latest_macd_signal = None
+            macd_above_signal = False
+            try:
+                if len(close) >= (long_window + signal_window):
+                    close_clean = close[~np.isnan(close)]
+                    if len(close_clean) >= (long_window + signal_window):
+                        macd, macd_signal, _ = talib.MACD(close_clean, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
+                        print(f"MACD output: len(macd)={len(macd)}, last_macd={macd[-1] if len(macd) > 0 else None}, len(signal)={len(macd_signal)}, last_signal={macd_signal[-1] if len(macd_signal) > 0 else None}")
+                        logging.info(f"MACD output: len(macd)={len(macd)}, last_macd={macd[-1] if len(macd) > 0 else None}, len(signal)={len(macd_signal)}, last_signal={macd_signal[-1] if len(macd_signal) > 0 else None}")
+                        if len(macd) > 0 and not np.isnan(macd[-1]):
+                            latest_macd = macd[-1]
+                        if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]):
+                            latest_macd_signal = macd_signal[-1]
+                        if latest_macd is not None and latest_macd_signal is not None:
+                            macd_above_signal = latest_macd > latest_macd_signal
+                    else:
+                        print(f"Insufficient valid data for MACD calculation for {yf_symbol} (after cleaning: {len(close_clean)} rows).")
+                        logging.info(f"Insufficient valid data for MACD calculation for {yf_symbol} (after cleaning: {len(close_clean)} rows).")
+                else:
+                    print(f"Insufficient data for MACD calculation for {yf_symbol} (rows: {len(close)}).")
+                    logging.info(f"Insufficient data for MACD calculation for {yf_symbol} (rows: {len(close)}).")
+                print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
+                logging.info(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
+            except Exception as e:
+                print(f"Error calculating MACD for {yf_symbol}: {e}")
+                logging.error(f"Error calculating MACD for {yf_symbol}: {e}")
             previous_price = get_previous_price(sym)
             price_increase = current_price > previous_price * 1.005
             print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
