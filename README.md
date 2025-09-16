@@ -5,6 +5,8 @@ Billionaire Trading Robot for Public API
 
 This is the Billionaire Strategy for Buying Great Stocks at the Lowest Price becuase you can never expect that the Sell Price is a profit, although you have the most control over the Buy Price.
 
+***** Upgrade to the newest version of this Python Robot today because some Python code updates were finished and some errors were recently fixed on September 16, 2025. *****
+
 install python packages command: 
 
 sh install-python-packages.sh
