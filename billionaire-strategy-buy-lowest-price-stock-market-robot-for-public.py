@@ -1270,6 +1270,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                     })
                                 symbols_to_buy.append(api_symbols)
                                 print(f"Added {api_symbols} to buy list and recorded in CSV.")
+                                send_alert(
+                                f"Buy order filled: {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}",
+                                subject=f"Buy Filled: {api_symbols}",
+                                use_sms=True
+                                )    
                             except Exception as e:
                                 logging.error(f"Error updating database/CSV for {api_symbols}: {e}")
                             finally:
