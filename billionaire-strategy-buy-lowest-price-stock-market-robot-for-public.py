@@ -1018,10 +1018,9 @@ def send_alert(message, subject="Trading Bot Alert", use_whatsapp=True):
         if api_key and phone:
             try:
                 url = "https://api.callmebot.com/whatsapp.php"
-                encoded_message = urllib.parse.quote(full_message)
                 params = {
                     "phone": phone,
-                    "text": encoded_message,
+                    "text": full_message,  # Send plain text instead of URL-encoded
                     "apikey": api_key
                 }
                 response = requests.get(url, params=params)
