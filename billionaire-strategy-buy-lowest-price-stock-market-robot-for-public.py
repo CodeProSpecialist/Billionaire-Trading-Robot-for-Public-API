@@ -1308,38 +1308,6 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 recent_avg_rsi = 50.00
                 prior_avg_rsi = 50.00
                 rsi_decrease = False
-            print(f"Calculating MACD for {sym}...")
-            logging.info(f"Calculating MACD for {sym}")
-            short_window = 12
-            long_window = 26
-            signal_window = 9
-            latest_macd = None
-            latest_macd_signal = None
-            macd_above_signal = False
-            try:
-                if len(close) >= (long_window + signal_window):
-                    close_clean = close[~np.isnan(close)]
-                    if len(close_clean) >= (long_window + signal_window):
-                        macd, macd_signal, _ = talib.MACD(close_clean, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
-                        print(f"MACD output: len(macd)={len(macd)}, last_macd={macd[-1] if len(macd) > 0 else None}, len(signal)={len(macd_signal)}, last_signal={macd_signal[-1] if len(macd_signal) > 0 else None}")
-                        logging.info(f"MACD output: len(macd)={len(macd)}, last_macd={macd[-1] if len(macd) > 0 else None}, len(signal)={len(macd_signal)}, last_signal={macd_signal[-1] if len(macd_signal) > 0 else None}")
-                        if len(macd) > 0 and not np.isnan(macd[-1]):
-                            latest_macd = macd[-1]
-                        if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]):
-                            latest_macd_signal = macd_signal[-1]
-                        if latest_macd is not None and latest_macd_signal is not None:
-                            macd_above_signal = latest_macd > latest_macd_signal
-                    else:
-                        print(f"Insufficient valid data for MACD calculation for {yf_symbol} (after cleaning: {len(close_clean)} rows).")
-                        logging.info(f"Insufficient valid data for MACD calculation for {yf_symbol} (after cleaning: {len(close_clean)} rows).")
-                else:
-                    print(f"Insufficient data for MACD calculation for {yf_symbol} (rows: {len(close)}).")
-                    logging.info(f"Insufficient data for MACD calculation for {yf_symbol} (rows: {len(close)}).")
-                print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
-                logging.info(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
-            except Exception as e:
-                print(f"Error calculating MACD for {yf_symbol}: {e}")
-                logging.error(f"Error calculating MACD for {yf_symbol}: {e}")
             previous_price = get_previous_price(sym)
             price_increase = current_price > previous_price * 1.005
             print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
@@ -1404,8 +1372,6 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                         logging.info(f"{yf_symbol}: Price stability check (5min): {price_stable}")
                         if price_stable:
                             score += 1
-                if macd_above_signal:
-                    score += 1
                 if not volume_decrease:
                     score += 1
                 if rsi_decrease:
@@ -1517,40 +1483,35 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                 })
                             send_alert(
                                 f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                subject=f"Buy Order Filled: {sym}",
+                                subject=f"Buy Executed: {sym}",
                                 use_whatsapp=True
                             )
-                            stop_order_id, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
-                            if stop_order_id:
-                                position.stop_order_id = stop_order_id
+                            order_id, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
+                            if order_id:
+                                position.stop_order_id = order_id
                                 position.stop_price = stop_price
                                 session.commit()
+                                print(f"Stop-loss set for {sym} at ${stop_price:.2f}, Order ID: {order_id}")
+                                logging.info(f"Stop-loss set for {sym} at ${stop_price:.2f}, Order ID: {order_id}")
+                            symbols_to_remove.append(sym)
                         except Exception as e:
                             session.rollback()
-                            logging.error(f"Database error for {sym}: {e}")
-                            print(f"Database error for {sym}: {e}")
+                            logging.error(f"Error updating database for {sym}: {e}")
+                            print(f"Error updating database for {sym}: {e}")
                         finally:
                             session.close()
-                    update_previous_price(sym, avg_price)
-                    symbols_to_remove.append(sym)
                 else:
                     print(f"Buy order for {sym} not filled or cancelled.")
                     logging.info(f"Buy order for {sym} not filled or cancelled")
-                    if status_info and status_info["status"] == "CANCELLED":
-                        client_cancel_order(order_id)
-            if PRINT_SYMBOLS_TO_BUY:
-                print(f"Symbols with buy signal: {sym}")
-                logging.info(f"Symbols with buy signal: {sym}")
         for sym in symbols_to_remove:
             remove_symbols_from_trade_list(sym)
-        print(f"\nTotal buy signals: {buy_signal}")
-        logging.info(f"Total buy signals: {buy_signal}")
-        if buy_signal > 0:
-            send_alert(
-                f"Total buy signals: {buy_signal} | Processed {len(valid_symbols)} symbols",
-                subject="Buy Signal Summary",
-                use_whatsapp=True
-            )
+        print(f"\nBuy Signal Summary: Total buy signals: {buy_signal} | Processed {len(valid_symbols)} symbols")
+        logging.info(f"Buy Signal Summary: Total buy signals: {buy_signal} | Processed {len(valid_symbols)} symbols")
+        send_alert(
+            f"Buy Signal Summary: Total buy signals: {buy_signal} | Processed {len(valid_symbols)} symbols",
+            subject="Buy Signal Summary",
+            use_whatsapp=True
+        )
     except Exception as e:
         logging.error(f"Error in buy_stocks: {e}")
         print(f"Error in buy_stocks: {e}")
