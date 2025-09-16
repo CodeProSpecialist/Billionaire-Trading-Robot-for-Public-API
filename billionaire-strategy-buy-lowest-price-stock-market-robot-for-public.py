@@ -1066,8 +1066,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             if latest_rsi and latest_rsi < 50:
                 score += 1
                 print(f"{yf_symbol}: RSI < 50 ({latest_rsi:.2f}): +1 score")
-            rsi_color = GREEN if latest_rsi and latest_rsi >= 50 else RED if latest_rsi else YELLOW
-            print(f"Latest RSI: {rsi_color}{latest_rsi:.2f if latest_rsi else 'N/A'}{RESET}")
+            # Fix: Handle RSI display, show 50.00 if RSI cannot be computed, remove color specifiers
+            rsi_display = f"{latest_rsi:.2f}" if latest_rsi is not None and not np.isnan(latest_rsi) else "50.00"
+            print(f"Latest RSI: {rsi_display}")
             if close[-1] <= close[-2] * 0.997:
                 score += 1
                 print(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
@@ -1138,7 +1139,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             else:
                 recent_avg_rsi = 0
                 prior_avg_rsi = 0
-            print(f"{yf_symbol}: Latest RSI = {latest_rsi:.2f}, Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
+            print(f"{yf_symbol}: Latest RSI = {latest_rsi:.2f if latest_rsi is not None and not np.isnan(latest_rsi) else 50.00}, Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
             print(f"Calculating MACD for {sym}...")
             short_window = 12
             long_window = 26
@@ -1147,7 +1148,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             latest_macd = macd[-1] if len(macd) > 0 and not np.isnan(macd[-1]) else None
             latest_macd_signal = macd_signal[-1] if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
             macd_above_signal = latest_macd > latest_macd_signal if latest_macd is not None and latest_macd_signal is not None else False
-            print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal else 'N/A'}, MACD above signal = {macd_above_signal}")
+            print(f"{yf_symbol}: MACD = {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal = {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}, MACD above signal = {macd_above_signal}")
             previous_price = get_previous_price(sym)
             price_increase = current_price > previous_price * 1.005
             print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
@@ -1193,8 +1194,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 continue
             daily_rsi = get_daily_rsi(sym)
             if daily_rsi is None or daily_rsi > 50:
-                print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
-                logging.info(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi}). Skipping.")
+                print(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi if daily_rsi is not None else 'N/A'}). Skipping.")
+                logging.info(f"{yf_symbol}: Daily RSI not oversold ({daily_rsi if daily_rsi is not None else 'N/A'}). Skipping.")
                 continue
             buy_conditions_met = False
             specific_reason = ""
@@ -1220,13 +1221,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 for pattern in detected_patterns:
                     if pattern == 'Hammer':
                         decline_amount = (last_price - current_price) / last_price if last_price > 0 else 0
-                        if latest_rsi < 35 and decline_amount >= 0.003:
+                        if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi < 35 and decline_amount >= 0.003:
                             score += 1
                     elif pattern == 'Bullish Engulfing':
                         if recent_avg_volume > 1.5 * prior_avg_volume:
                             score += 1
                     elif pattern == 'Morning Star':
-                        if latest_rsi < 40:
+                        if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi < 40:
                             score += 1
                     elif pattern == 'Piercing Line':
                         if recent_avg_rsi < 40:
@@ -1235,13 +1236,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                         if not volume_decrease:
                             score += 1
                     elif pattern == 'Dragonfly Doji':
-                        if latest_rsi < 30:
+                        if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi < 30:
                             score += 1
                     elif pattern == 'Inverted Hammer':
                         if rsi_decrease:
                             score += 1
                     elif pattern == 'Tweezer Bottom':
-                        if latest_rsi < 40:
+                        if latest_rsi is not None and not np.isnan(latest_rsi) and latest_rsi < 40:
                             score += 1
                 if score >= 3:
                     buy_conditions_met = True
@@ -1345,8 +1346,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                             position.stop_order_id = order_id_stop
                                             position.stop_price = stop_price
                                         session.commit()
-                                        with open(csv_filename, mode='a', newline='') as csv_file:
-                                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                        with open(csv_filename, mode='a', newline='') as csv_writer:
+                                            csv_writer = csv.DictWriter(csv_writer, fieldnames=fieldnames)
                                             csv_writer.writerow({
                                                 'Date': today_date_str,
                                                 'Buy': filled_qty,
@@ -1360,7 +1361,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                             f"Buy order filled: {filled_qty:.4f} shares of {api_symbols} at ${filled_price:.2f}",
                                             subject=f"Buy Filled: {api_symbols}",
                                             use_sms=True
-                                        )    
+                                        )
                                     except Exception as e:
                                         session.rollback()
                                         logging.error(f"Error updating database/CSV for {api_symbols}: {e}")
@@ -1387,6 +1388,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"\nSymbols to buy: {symbols_to_buy}")
         if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
             print_database_tables()
+    except Exception as e:
+        logging.error(f"Fatal error in buy_stocks: {e}")
+        raise
     finally:
         task_running['buy_stocks'] = False
 
