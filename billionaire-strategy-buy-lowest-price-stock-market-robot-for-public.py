@@ -1702,3 +1702,50 @@ def sell_stocks(symbols_to_sell_dict):
         print(f"Error in sell_stocks: {e}")
     finally:
         task_running['sell_stocks'] = False
+
+# Section 7 (Lines 3001-3091: Main Function and Execution)
+
+def main():
+    try:
+        print("\nStarting Billionaires Buying Strategy Trading Robot...")
+        logging.info("Starting Billionaires Buying Strategy Trading Robot")
+        if not fetch_access_token_and_account_id():
+            logging.error("Failed to initialize access token and account ID. Exiting.")
+            print("Failed to initialize access token and account ID. Exiting.")
+            return
+        stop_if_stock_market_is_closed()
+        sync_db_with_api()
+        symbols_to_sell_dict = load_positions_from_database()
+        if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+            print_database_tables()
+        symbols_to_buy_list = get_symbols_to_buy()
+        schedule.every(5).minutes.do(lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock))
+        schedule.every(5).minutes.do(lambda: sell_stocks(symbols_to_sell_dict))
+        schedule.every(1).minutes.do(check_stop_order_status)
+        schedule.every(5).minutes.do(check_price_moves)
+        schedule.every(5).minutes.do(monitor_stop_losses)
+        schedule.every(5).minutes.do(sync_db_with_api)
+        schedule.every(1).hours.do(refresh_token_if_needed)
+        while True:
+            try:
+                eastern = pytz.timezone('US/Eastern')
+                current_datetime = datetime.now(eastern)
+                schedule.run_pending()
+                if not (9 <= current_datetime.hour < 17):
+                    print("Outside market hours (9 AM - 5 PM Eastern). Waiting...")
+                    logging.info("Outside market hours. Waiting")
+                    time.sleep(60)
+                    stop_if_stock_market_is_closed()
+                else:
+                    time.sleep(60)
+            except Exception as e:
+                logging.error(f"Error in main loop: {e}")
+                print(f"Error in main loop: {e}")
+                time.sleep(60)
+    except Exception as e:
+        logging.error(f"Fatal error in main: {e}")
+        print(f"Fatal error in main: {e}")
+
+if __name__ == "__main__":
+    main()
+    
