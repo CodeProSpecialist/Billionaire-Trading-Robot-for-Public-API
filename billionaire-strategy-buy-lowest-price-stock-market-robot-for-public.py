@@ -1,6 +1,3 @@
-```python
-# Section 1 (Lines 1-412: Imports, Configuration, Global Variables, and Database Setup)
-
 import os
 import time
 import csv
