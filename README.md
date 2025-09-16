@@ -37,7 +37,7 @@ python3 billionaire-strategy-buy-lowest-price-stock-market-robot-for-public.py
 
 ## Disclaimer
 
-*This trading robot is an independent software tool developed for educational and personal use. It is not affiliated with, endorsed by, or sponsored by Public.com or Twilio. Users are responsible for obtaining their own API keys from Public.com and Twilio, complying with their respective terms of service, and understanding the risks associated with automated trading. Trading involves significant financial risk, and past performance is not indicative of future results. Use this tool at your own discretion and consult a financial advisor before trading.*
+*This trading robot is an independent software tool developed for educational and personal use. It is not affiliated with, endorsed by, or sponsored by Public.com or Callmebot. Users are responsible for obtaining their own API keys from Public.com and Callmebot, complying with their respective terms of service, and understanding the risks associated with automated trading. Trading involves significant financial risk, and past performance is not indicative of future results. Use this tool at your own discretion and consult a financial advisor before trading.*
 
 Disclaimer:
 
