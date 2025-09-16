@@ -1520,3 +1520,185 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
     finally:
         task_running['buy_stocks'] = False
 
+def sell_stocks(symbols_to_sell_dict):
+    if task_running['sell_stocks']:
+        print("sell_stocks already running. Skipping.")
+        logging.info("sell_stocks already running. Skipping")
+        return
+    task_running['sell_stocks'] = True
+    try:
+        print("\nStarting sell_stocks function...")
+        logging.info("Starting sell_stocks function")
+        sync_db_with_api()
+        with db_lock:
+            session = SessionLocal()
+            try:
+                positions = session.query(Position).all()
+                if not positions:
+                    print("No positions to sell.")
+                    logging.info("No positions to sell")
+                    return
+                sell_signals = 0
+                today_date_str = datetime.today().strftime("%Y-%m-%d")
+                for pos in positions:
+                    symbol = pos.symbols
+                    qty = pos.quantity
+                    avg_price = pos.avg_price
+                    print(f"\n{'='*60}")
+                    print(f"Processing sell for {symbol}...")
+                    print(f"{'='*60}")
+                    logging.info(f"Processing sell for {symbol}")
+                    if qty <= 0:
+                        print(f"No quantity to sell for {symbol}.")
+                        logging.info(f"No quantity to sell for {symbol}")
+                        session.delete(pos)
+                        session.commit()
+                        continue
+                    current_price = client_get_quote(symbol)
+                    if current_price is None:
+                        print(f"No valid price data for {symbol}. Skipping.")
+                        logging.info(f"No valid price data for {symbol}. Skipping")
+                        continue
+                    current_color = GREEN if current_price >= 0 else RED
+                    avg_color = GREEN if avg_price >= 0 else RED
+                    print(f"Current price: {current_color}${current_price:.2f}{RESET}, Avg buy price: {avg_color}${avg_price:.2f}{RESET}")
+                    logging.info(f"Current price: ${current_price:.2f}, Avg buy price: ${avg_price:.2f}")
+                    df = yf.Ticker(symbol.replace('.', '-')).history(period="20d")
+                    if df.empty or len(df) < 14:
+                        print(f"Insufficient data for {symbol} (rows: {len(df)}). Skipping.")
+                        logging.info(f"Insufficient data for {symbol} (rows: {len(df)}). Skipping")
+                        continue
+                    close = df['Close'].values
+                    score = 0
+                    try:
+                        rsi = talib.RSI(close, timeperiod=14)
+                        latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
+                        latest_rsi = round(latest_rsi, 2)
+                        if latest_rsi > 70:
+                            score += 1
+                            print(f"{symbol}: RSI > 70 ({latest_rsi:.2f}): +1 score")
+                            logging.info(f"{symbol}: RSI > 70 ({latest_rsi:.2f}): +1 score")
+                        print(f"Latest RSI: {latest_rsi:.2f}")
+                        logging.info(f"Latest RSI: {latest_rsi:.2f}")
+                    except Exception as e:
+                        print(f"Error calculating RSI for {symbol}: {e}")
+                        logging.error(f"Error calculating RSI for {symbol}: {e}")
+                        latest_rsi = 50.00
+                    short_window = 12
+                    long_window = 26
+                    signal_window = 9
+                    try:
+                        macd, macd_signal, _ = talib.MACD(close, fastperiod=short_window, slowperiod=long_window, signalperiod=signal_window)
+                        latest_macd = macd[-1] if len(macd) > 0 and not np.isnan(macd[-1]) else None
+                        latest_macd_signal = macd_signal[-1] if len(macd_signal) > 0 and not np.isnan(macd_signal[-1]) else None
+                        macd_below_signal = latest_macd < latest_macd_signal if latest_macd is not None and latest_macd_signal is not None else False
+                        if macd_below_signal:
+                            score += 1
+                            print(f"{symbol}: MACD below signal line: +1 score")
+                            logging.info(f"{symbol}: MACD below signal line: +1 score")
+                        print(f"MACD: {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal: {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}")
+                        logging.info(f"MACD: {latest_macd:.2f if latest_macd is not None else 'N/A'}, Signal: {latest_macd_signal:.2f if latest_macd_signal is not None else 'N/A'}")
+                    except Exception as e:
+                        print(f"Error calculating MACD for {symbol}: {e}")
+                        logging.error(f"Error calculating MACD for {symbol}: {e}")
+                    recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
+                    prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
+                    volume_increase = recent_avg_volume > prior_avg_volume * 1.5 if len(df) >= 10 else False
+                    if volume_increase:
+                        score += 1
+                        print(f"{symbol}: Volume increase detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f}): +1 score")
+                        logging.info(f"{symbol}: Volume increase detected (Recent avg = {recent_avg_volume:.0f}, Prior avg = {prior_avg_volume:.0f})")
+                    price_drop = current_price < avg_price * 0.98
+                    if price_drop:
+                        score += 1
+                        print(f"{symbol}: Price drop >= 2% below avg buy price: +1 score")
+                        logging.info(f"{symbol}: Price drop >= 2% below avg buy price: +1 score")
+                    profit_percentage = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
+                    if profit_percentage >= 5:
+                        score += 2
+                        print(f"{symbol}: Profit >= 5% ({profit_percentage:.2f}%): +2 score")
+                        logging.info(f"{symbol}: Profit >= 5% ({profit_percentage:.2f}%): +2 score")
+                    if score < 3:
+                        print(f"{symbol}: Sell score too low ({score} < 3). Skipping.")
+                        logging.info(f"{symbol}: Sell score too low ({score} < 3). Skipping")
+                        continue
+                    sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+                    if sell_qty == 0:
+                        print(f"{symbol}: Sell quantity is 0 after rounding. Skipping.")
+                        logging.info(f"{symbol}: Sell quantity is 0 after rounding. Skipping")
+                        continue
+                    if not ensure_no_open_orders(symbol):
+                        print(f"Cannot proceed with sell for {symbol} due to open orders.")
+                        logging.info(f"Cannot proceed with sell for {symbol} due to open orders")
+                        continue
+                    with buy_sell_lock:
+                        order_id = client_place_order(symbol, sell_qty, "SELL", order_type="MARKET")
+                        if not order_id:
+                            print(f"Failed to place sell order for {symbol}.")
+                            logging.error(f"Failed to place sell order for {symbol}")
+                            continue
+                        status_info = poll_order_status(order_id)
+                        if status_info and status_info["status"] == "FILLED":
+                            filled_qty = status_info["filled_qty"]
+                            avg_sell_price = status_info["avg_price"] or current_price
+                            if filled_qty <= 0:
+                                print(f"Sell order for {symbol} filled with qty {filled_qty}. Skipping DB update.")
+                                logging.info(f"Sell order for {symbol} filled with qty {filled_qty}. Skipping DB update")
+                                continue
+                            sell_signals += 1
+                            with db_lock:
+                                trade = TradeHistory(
+                                    symbols=symbol,
+                                    action='sell',
+                                    quantity=filled_qty,
+                                    price=avg_sell_price,
+                                    date=today_date_str
+                                )
+                                session.add(trade)
+                                pos.quantity -= filled_qty
+                                if pos.quantity <= 0:
+                                    if pos.stop_order_id:
+                                        client_cancel_order(pos.stop_order_id)
+                                    session.delete(pos)
+                                session.commit()
+                                print(f"Sell order filled for {filled_qty:.4f} shares of {symbol} at ${avg_sell_price:.2f}")
+                                logging.info(f"Sell order filled for {filled_qty:.4f} shares of {symbol} at ${avg_sell_price:.2f}")
+                                with open(csv_filename, mode='a', newline='') as csv_file:
+                                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                    csv_writer.writerow({
+                                        'Date': today_date_str,
+                                        'Buy': 0,
+                                        'Sell': filled_qty,
+                                        'Quantity': filled_qty,
+                                        'Symbol': symbol,
+                                        'Price Per Share': avg_sell_price
+                                    })
+                                send_alert(
+                                    f"Sold {filled_qty:.4f} shares of {symbol} at ${avg_sell_price:.2f} (Profit: {profit_percentage:.2f}%)",
+                                    subject=f"Sell Order Filled: {symbol}",
+                                    use_whatsapp=True
+                                )
+                        else:
+                            print(f"Sell order for {symbol} not filled or cancelled.")
+                            logging.info(f"Sell order for {symbol} not filled or cancelled")
+                            if status_info and status_info["status"] == "CANCELLED":
+                                client_cancel_order(order_id)
+                print(f"\nTotal sell signals: {sell_signals}")
+                logging.info(f"Total sell signals: {sell_signals}")
+                if sell_signals > 0:
+                    send_alert(
+                        f"Total sell signals: {sell_signals} | Processed {len(positions)} positions",
+                        subject="Sell Signal Summary",
+                        use_whatsapp=True
+                    )
+            except Exception as e:
+                session.rollback()
+                logging.error(f"Database error in sell_stocks: {e}")
+                print(f"Database error in sell_stocks: {e}")
+            finally:
+                session.close()
+    except Exception as e:
+        logging.error(f"Error in sell_stocks: {e}")
+        print(f"Error in sell_stocks: {e}")
+    finally:
+        task_running['sell_stocks'] = False
