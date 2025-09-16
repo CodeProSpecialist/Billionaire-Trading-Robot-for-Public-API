@@ -510,6 +510,7 @@ def print_technical_indicators(symbols, historical_data):
             signal_display = f"{signal_value:.4f}"
             macd_color = GREEN if macd_value >= signal_value else RED
         rsi_value = row['rsi']
+        # Fix: Compute rsi_display based on whether rsi_value is valid
         if np.isnan(rsi_value):
             rsi_display = "N/A"
             rsi_color = YELLOW
