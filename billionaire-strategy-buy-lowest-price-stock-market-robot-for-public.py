@@ -1642,3 +1642,72 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     finally:
         task_running['sell_stocks'] = False
 
+def main():
+    global symbols_to_buy, symbols_to_sell_dict
+    print("\n")
+    print('''
+    *********************************************************************************
+    ************ Billionaire Buying Strategy Version ********************************
+    *********************************************************************************
+        2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                    https://github.com/CodeProSpecialist
+           Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+    ''')
+    logging.info("Starting Billionaire Buying Strategy Trading Robot")
+    if not fetch_token_and_account():
+        print("Failed to initialize token and account. Exiting.")
+        logging.error("Failed to initialize token and account. Exiting")
+        return
+    stop_if_stock_market_is_closed()
+    symbols_to_buy = get_symbols_to_buy()
+    if PRINT_SYMBOLS_TO_BUY:
+        print("\nSymbols to Buy:")
+        for symbol in symbols_to_buy:
+            print(symbol)
+    symbols_to_sell_dict = load_positions_from_database()
+    if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+        print("\nPositions Loaded from Database to Sell:")
+        for symbol, (avg_price, purchase_date) in symbols_to_sell_dict.items():
+            current_price = client_get_quote(symbol)
+            percentage_change = ((current_price - avg_price) / avg_price * 100) if current_price and avg_price else 0
+            color = GREEN if percentage_change >= 0 else RED
+            price_color = GREEN if current_price >= 0 else RED
+            print(f"{symbol} | Avg Price: ${avg_price:.2f} | Date: {purchase_date} | Current: {price_color}${current_price:.2f}{RESET} | Change: {color}{percentage_change:.2f}%{RESET}")
+    sync_db_with_api()
+    schedule.every(1).minutes.do(lambda: refresh_token_if_needed())
+    schedule.every(5).minutes.do(lambda: check_price_moves())
+    schedule.every(5).minutes.do(lambda: check_stop_order_status())
+    schedule.every(5).minutes.do(lambda: monitor_stop_losses())
+    schedule.every(5).minutes.do(lambda: sync_db_with_api())
+    schedule.every(5).minutes.do(lambda: buy_stocks(symbols_to_sell_dict, symbols_to_buy, buy_sell_lock))
+    schedule.every(5).minutes.do(lambda: sell_stocks(symbols_to_sell_dict, buy_sell_lock))
+    schedule.every(5).minutes.do(print_database_tables)
+    try:
+        while True:
+            current_time = datetime.now(eastern)
+            schedule.run_pending()
+            time.sleep(1)
+            nyse = mcal.get_calendar('NYSE')
+            schedule_data = nyse.schedule(start_date=current_time.date(), end_date=current_time.date())
+            if schedule_data.empty:
+                print("Market is closed (holiday or weekend). Sleeping for 60 seconds...")
+                logging.info("Market is closed (holiday or weekend). Sleeping for 60 seconds")
+                time.sleep(60)
+                continue
+            market_open = schedule_data.iloc[0]['market_open'].astimezone(eastern)
+            market_close = schedule_data.iloc[0]['market_close'].astimezone(eastern)
+            if not (market_open <= current_time <= market_close):
+                print(f"Market is closed. Current time: {current_time.strftime('%I:%M:%S %p')}. Sleeping for 60 seconds...")
+                logging.info(f"Market is closed. Current time: {current_time.strftime('%I:%M:%S %p')}. Sleeping for 60 seconds")
+                time.sleep(60)
+                continue
+            print(f"Market is open. Current time: {current_time.strftime('%I:%M:%S %p')}. Running scheduled tasks...")
+            logging.info(f"Market is open. Current time: {current_time.strftime('%I:%M:%S %p')}. Running scheduled tasks")
+    except KeyboardInterrupt:
+        print("\nTrading bot stopped by user.")
+        logging.info("Trading bot stopped by user")
+    except Exception as e:
+        print(f"\nUnexpected error in main loop: {e}")
+        logging.error(f"Unexpected error in main loop: {e}")
+        traceback.print_exc()
+        send_alert(f"Trading bot crashed: {str(e)}", subject="Trading Bot Error", use_whatsapp=True)
