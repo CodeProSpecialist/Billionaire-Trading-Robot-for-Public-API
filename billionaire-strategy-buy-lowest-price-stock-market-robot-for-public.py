@@ -1711,3 +1711,7 @@ def main():
         logging.error(f"Unexpected error in main loop: {e}")
         traceback.print_exc()
         send_alert(f"Trading bot crashed: {str(e)}", subject="Trading Bot Error", use_whatsapp=True)
+
+if __name__ == "__main__":
+    main()
+    
