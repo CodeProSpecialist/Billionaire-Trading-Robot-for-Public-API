@@ -931,3 +931,477 @@ def monitor_stop_losses():
     finally:
         task_running['monitor_stop_losses'] = False
 
+def check_stop_order_status():
+    if task_running['check_stop_order_status']:
+        print("check_stop_order_status already running. Skipping.")
+        logging.info("check_stop_order_status already running. Skipping")
+        return
+    task_running['check_stop_order_status'] = True
+    try:
+        with db_lock:
+            session = SessionLocal()
+            try:
+                positions = session.query(Position).filter(Position.stop_order_id != None).all()
+                today_date_str = datetime.today().strftime("%Y-%m-%d")
+                for pos in positions:
+                    status_info = client_get_order_status(pos.stop_order_id)
+                    if status_info and status_info["status"] == "FILLED":
+                        filled_qty = status_info["filled_qty"]
+                        filled_price = status_info["avg_price"] or client_get_quote(pos.symbols)
+                        send_alert(
+                            f"Stop-loss triggered for {pos.symbols}: {filled_qty:.4f} shares sold at ${filled_price:.2f}",
+                            subject=f"Stop-Loss Triggered: {pos.symbols}",
+                            use_whatsapp=True
+                        )
+                        trade = TradeHistory(
+                            symbols=pos.symbols,
+                            action='sell',
+                            quantity=filled_qty,
+                            price=filled_price,
+                            date=today_date_str
+                        )
+                        session.add(trade)
+                        pos.quantity = 0
+                        pos.stop_order_id = None
+                        pos.stop_price = None
+                        session.delete(pos)
+                        session.commit()
+                        with open(csv_filename, mode='a', newline='') as csv_file:
+                            csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                            csv_writer.writerow({
+                                'Date': today_date_str,
+                                'Buy': 0,
+                                'Sell': filled_qty,
+                                'Quantity': filled_qty,
+                                'Symbol': pos.symbols,
+                                'Price Per Share': filled_price
+                            })
+                        logging.info(f"Stop-loss sell recorded for {filled_qty:.4f} shares of {pos.symbols} at ${filled_price:.2f}")
+                        print(f"Stop-loss sell recorded for {filled_qty:.4f} shares of {pos.symbols} at ${filled_price:.2f}")
+            except Exception as e:
+                session.rollback()
+                logging.error(f"Error checking stop orders: {e}")
+                print(f"Error checking stop orders: {e}")
+            finally:
+                session.close()
+    finally:
+        task_running['check_stop_order_status'] = False
+
+def check_price_moves():
+    if task_running['check_price_moves']:
+        print("check_price_moves already running. Skipping.")
+        logging.info("check_price_moves already running. Skipping")
+        return
+    task_running['check_price_moves'] = True
+    try:
+        with db_lock:
+            session = SessionLocal()
+            try:
+                positions = session.query(Position).all()
+                for pos in positions:
+                    current_price = client_get_quote(pos.symbols)
+                    if current_price is None:
+                        continue
+                    pct_change = (current_price - pos.avg_price) / pos.avg_price * 100
+                    if abs(pct_change) >= 5:
+                        direction = "up" if pct_change > 0 else "down"
+                        send_alert(
+                            f"{pos.symbols} moved {pct_change:.2f}% {direction} from avg ${pos.avg_price:.2f} to ${current_price:.2f}",
+                            subject=f"Price Alert: {pos.symbols}",
+                            use_whatsapp=True
+                        )
+            except Exception as e:
+                session.rollback()
+                logging.error(f"Error checking price moves: {e}")
+                print(f"Error checking price moves: {e}")
+            finally:
+                session.close()
+    finally:
+        task_running['check_price_moves'] = False
+
+def poll_order_status(order_id, timeout=300):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        status_info = client_get_order_status(order_id)
+        if status_info and status_info["status"] in ["FILLED", "CANCELLED", "REJECTED"]:
+            return status_info
+        time.sleep(5)
+    logging.warning(f"Order {order_id} status check timed out after {timeout} seconds.")
+    print(f"Order {order_id} status check timed out after {timeout} seconds.")
+    return None
+
+def send_alert(message, subject="Trading Bot Alert", use_whatsapp=True):
+    full_message = f"{subject}: {message}"
+    logging.info(f"Alert: {full_message}")
+    print(f"{YELLOW}ALERT: {full_message}{RESET}")
+    if use_whatsapp:
+        api_key = os.getenv('CALLMEBOT_API_KEY')
+        phone = os.getenv('CALLMEBOT_PHONE')
+        if api_key and phone:
+            try:
+                url = "https://api.callmebot.com/whatsapp.php"
+                params = {
+                    "phone": phone,
+                    "text": full_message,
+                    "apikey": api_key
+                }
+                response = requests.get(url, params=params)
+                if response.status_code == 200:
+                    print(f"WhatsApp alert sent: {subject}")
+                    logging.info(f"WhatsApp alert sent: {subject}")
+                else:
+                    print(f"Failed to send WhatsApp alert: {response.text}")
+                    logging.error(f"Failed to send WhatsApp alert: {response.text}")
+            except Exception as e:
+                logging.error(f"Error sending WhatsApp alert: {e}")
+                print(f"Error sending WhatsApp alert: {e}")
+
+def stop_if_stock_market_is_closed():
+    nyse = mcal.get_calendar('NYSE')
+    while True:
+        eastern = pytz.timezone('US/Eastern')
+        current_datetime = datetime.now(eastern)
+        current_time_str = current_datetime.strftime("%A, %B %d, %Y, %I:%M:%S %p")
+        schedule = nyse.schedule(start_date=current_datetime.date(), end_date=current_datetime.date())
+        if not schedule.empty:
+            market_open = schedule.iloc[0]['market_open'].astimezone(eastern)
+            market_close = schedule.iloc[0]['market_close'].astimezone(eastern)
+            if market_open <= current_datetime <= market_close:
+                print("Market is open. Proceeding with trading operations.")
+                logging.info(f"{current_time_str}: Market is open. Proceeding with trading operations.")
+                break
+            else:
+                print("\n")
+                print('''
+                *********************************************************************************
+                ************ Billionaire Buying Strategy Version ********************************
+                *********************************************************************************
+                    2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                                https://github.com/CodeProSpecialist
+                       Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+                ''')
+                print(f'Current date & time (Eastern Time): {current_time_str}')
+                print(f"Market is closed. Open hours: {market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')}")
+                print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
+                print("\n")
+                logging.info(f"{current_time_str}: Market is closed. Waiting for market open.")
+                time.sleep(60)
+        else:
+            print("\n")
+            print('''
+            *********************************************************************************
+            ************ Billionaire Buying Strategy Version ********************************
+            *********************************************************************************
+                2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                            https://github.com/CodeProSpecialist
+                   Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+            ''')
+            print(f'Current date & time (Eastern Time): {current_time_str}')
+            print("Market is closed today (holiday or weekend).")
+            print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
+            print("\n")
+            logging.info(f"{current_time_str}: Market is closed today (holiday or weekend).")
+            time.sleep(60)
+
+YF_CALLS_PER_MINUTE = 60
+CLIENT_CALLS_PER_MINUTE = 100
+ONE_MINUTE = 60
+
+@sleep_and_retry
+@limits(calls=CLIENT_CALLS_PER_MINUTE, period=ONE_MINUTE)
+def rate_limited_get_quote(sym):
+    return client_get_quote(sym)
+
+@sleep_and_retry
+@limits(calls=YF_CALLS_PER_MINUTE, period=ONE_MINUTE)
+def rate_limited_yf_history(sym, period="20d"):
+    return yf.Ticker(sym.replace('.', '-')).history(period=period)
+
+def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
+    if task_running['buy_stocks']:
+        print("buy_stocks already running. Skipping.")
+        logging.info("buy_stocks already running. Skipping")
+        return
+    task_running['buy_stocks'] = True
+    try:
+        print("Starting buy_stocks function...")
+        logging.info("Starting buy_stocks function")
+        global price_history, last_stored
+        if not symbols_to_buy_list:
+            print("No symbols to buy.")
+            logging.info("No symbols to buy.")
+            return
+        symbols_to_remove = []
+        buy_signal = 0
+        acc = client_get_account()
+        total_equity = acc['equity']
+        print(f"Total account equity: ${total_equity:.2f}")
+        logging.info(f"Total account equity: ${total_equity:.2f}")
+        positions = client_list_positions()
+        current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
+        max_new_exposure = total_equity * 0.98 - current_exposure
+        exposure_color = GREEN if max_new_exposure >= 0 else RED
+        print(f"Current exposure: ${current_exposure:.2f}, Max new exposure: {exposure_color}${max_new_exposure:.2f}{RESET}")
+        logging.info(f"Current exposure: ${current_exposure:.2f}, Max new exposure: ${max_new_exposure:.2f}")
+        if max_new_exposure <= 0:
+            print("Portfolio exposure limit reached. No new buys.")
+            logging.info("Portfolio exposure limit reached.")
+            return
+        valid_symbols = []
+        print("Filtering valid symbols for buying...")
+        logging.info("Filtering valid symbols for buying")
+        for sym in symbols_to_buy_list:
+            current_price = rate_limited_get_quote(sym)
+            if current_price is None:
+                print(f"No valid price data for {sym}. Skipping.")
+                logging.info(f"No valid price data for {sym}. Skipping")
+                continue
+            df = rate_limited_yf_history(sym)
+            if df.empty or len(df) < 14:
+                print(f"Insufficient data for {sym} (daily rows: {len(df)}). Skipping.")
+                logging.info(f"Insufficient data for {sym} (daily rows: {len(df)}). Skipping")
+                continue
+            valid_symbols.append(sym)
+        print(f"Valid symbols to process: {valid_symbols}")
+        logging.info(f"Valid symbols to process: {valid_symbols}")
+        if not valid_symbols:
+            print("No valid symbols to buy after filtering.")
+            logging.info("No valid symbols to buy after filtering.")
+            return
+        min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
+        day_5_prices = get_last_price_within_past_5_days(valid_symbols)
+        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
+            dollar_amount = 1.0
+        else:
+            dollar_amount = max_new_exposure / len(valid_symbols)
+        if dollar_amount <= 0:
+            print("Calculated dollar amount for buys is <= 0. Skipping buys.")
+            logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
+            return
+        for sym in valid_symbols:
+            print(f"\n{'='*60}")
+            print(f"Processing {sym}...")
+            print(f"{'='*60}")
+            logging.info(f"Processing {sym}")
+            today_date = datetime.today().date()
+            today_date_str = today_date.strftime("%Y-%m-%d")
+            current_datetime = datetime.now(eastern)
+            current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
+            print(f"Analysis time: {current_time_str}")
+            logging.info(f"Analysis time: {current_time_str}")
+            current_price = rate_limited_get_quote(sym)
+            if current_price is None:
+                print(f"No valid price data for {sym}.")
+                logging.info(f"No valid price data for {sym}")
+                continue
+            current_color = GREEN if current_price >= 0 else RED
+            print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
+            logging.info(f"Current price for {sym}: ${current_price:.4f}")
+            min_5_price = min_5_prices.get(sym)
+            day_5_price = day_5_prices.get(sym)
+            if min_5_price and day_5_price:
+                min_vs_day_change = ((min_5_price - day_5_price) / day_5_price * 100) if day_5_price else 0
+                change_color = GREEN if min_vs_day_change >= 0 else RED
+                print(f"5-min price: ${min_5_price:.4f} vs 5-day close: ${day_5_price:.2f} | Change: {change_color}{min_vs_day_change:.2f}%{RESET}")
+                logging.info(f"5-min price: ${min_5_price:.4f} vs 5-day close: ${day_5_price:.2f} | Change: {min_vs_day_change:.2f}%")
+            current_timestamp = time.time()
+            with price_history_lock:
+                if sym not in price_history:
+                    price_history[sym] = {interval: [] for interval in interval_map}
+                    last_stored[sym] = {interval: 0 for interval in interval_map}
+            for interval, delta in interval_map.items():
+                with price_history_lock:
+                    if current_timestamp - last_stored[sym][interval] >= delta:
+                        price_history[sym][interval].append(current_price)
+                        last_stored[sym][interval] = current_timestamp
+                        print(f"Stored price {current_price} for {sym} at {interval} interval.")
+                        logging.info(f"Stored price {current_price} for {sym} at {interval} interval")
+            yf_symbol = sym.replace('.', '-')
+            print(f"Fetching 20-day historical data for {yf_symbol}...")
+            logging.info(f"Fetching 20-day historical data for {yf_symbol}")
+            df = rate_limited_yf_history(yf_symbol)
+            if df.empty or len(df) < 14:
+                print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
+                logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping")
+                continue
+            df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+            if len(df) < 14:
+                print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
+                logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
+                continue
+            score = 0
+            close = df['Close'].values
+            open_ = df['Open'].values
+            high = df['High'].values
+            low = df['Low'].values
+            lookback_candles = min(20, len(close))
+            print(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
+            logging.info(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
+            try:
+                rsi = talib.RSI(close, timeperiod=14)
+                latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
+                latest_rsi = round(latest_rsi, 2)
+                if latest_rsi < 50:
+                    score += 1
+                    print(f"{yf_symbol}: RSI < 50 ({latest_rsi:.2f}): +1 score")
+                    logging.info(f"{yf_symbol}: RSI < 50 ({latest_rsi:.2f}): +1 score")
+                rsi_display = f"{latest_rsi:.2f}"
+                print(f"Latest RSI: {rsi_display}")
+                logging.info(f"Latest RSI: {rsi_display}")
+            except Exception as e:
+                print(f"Error calculating RSI for {yf_symbol}: {e}")
+                logging.error(f"Error calculating RSI for {yf_symbol}: {e}")
+                latest_rsi = 50.00
+                print(f"Latest RSI: 50.00")
+                logging.info(f"Latest RSI: 50.00")
+            if close[-1] <= close[-2] * 0.997:
+                score += 1
+                print(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
+                logging.info(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
+            print(f"Checking for bullish reversal patterns in {sym}...")
+            logging.info(f"Checking for bullish reversal patterns in {sym}")
+            bullish_reversal_detected = False
+            reversal_candle_index = None
+            detected_patterns = []
+            patterns = {
+                'Hammer': talib.CDLHAMMER,
+                'Bullish Engulfing': talib.CDLENGULFING,
+                'Morning Star': talib.CDLMORNINGSTAR,
+                'Piercing Line': talib.CDLPIERCING,
+                'Three White Soldiers': talib.CDL3WHITESOLDIERS,
+                'Dragonfly Doji': talib.CDLDRAGONFLYDOJI,
+                'Inverted Hammer': talib.CDLINVERTEDHAMMER,
+                'Tweezer Bottom': talib.CDLMATCHINGLOW
+            }
+            valid_mask = ~np.isnan(open_) & ~np.isnan(high) & ~np.isnan(low) & ~np.isnan(close)
+            if valid_mask.sum() < 2:
+                print(f"Insufficient valid data for {sym} after removing NaN values. Skipping candlestick analysis.")
+                logging.info(f"Insufficient valid data for {sym} after removing NaN values.")
+                continue
+            open_valid = np.array(open_[valid_mask], dtype=np.float64)
+            high_valid = np.array(high[valid_mask], dtype=np.float64)
+            low_valid = np.array(low[valid_mask], dtype=np.float64)
+            close_valid = np.array(close[valid_mask], dtype=np.float64)
+            for i in range(-1, -lookback_candles, -1):
+                if abs(i) > len(open_valid):
+                    continue
+                try:
+                    for name, func in patterns.items():
+                        res = func(open_valid[:i + 1], high_valid[:i + 1], low_valid[:i + 1], close_valid[:i + 1])
+                        if res[-1] > 0:
+                            detected_patterns.append(name)
+                            bullish_reversal_detected = True
+                            reversal_candle_index = i
+                    if bullish_reversal_detected:
+                        score += 1
+                        print(f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)} (+1 score)")
+                        logging.info(f"{yf_symbol}: Detected bullish reversal patterns at candle {reversal_candle_index}: {', '.join(detected_patterns)}")
+                        break
+                except Exception as e:
+                    print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                    logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                    continue
+            if score < 3:
+                print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
+                logging.info(f"{yf_symbol}: Score too low ({score} < 3). Skipping")
+                continue
+            print(f"Calculating volume metrics for {sym}...")
+            logging.info(f"Calculating volume metrics for {sym}")
+            recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
+            prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
+            volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
+            print(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
+            logging.info(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
+            print(f"Calculating RSI metrics for {sym}...")
+            logging.info(f"Calculating RSI metrics for {sym}")
+            try:
+                rsi_series = talib.RSI(close, timeperiod=14)
+                rsi_decrease = False
+                recent_avg_rsi = 50.00
+                prior_avg_rsi = 50.00
+                if len(rsi_series) >= 10:
+                    recent_rsi_values = rsi_series[-5:][~np.isnan(rsi_series[-5:])]
+                    prior_rsi_values = rsi_series[-10:-5][~np.isnan(rsi_series[-10:-5])]
+                    if len(recent_rsi_values) > 0 and len(prior_rsi_values) > 0:
+                        recent_avg_rsi = round(np.mean(recent_rsi_values), 2)
+                        prior_avg_rsi = round(np.mean(prior_rsi_values), 2)
+                        rsi_decrease = recent_avg_rsi < prior_avg_rsi
+                    else:
+                        recent_avg_rsi = 50.00
+                        prior_avg_rsi = 50.00
+                print(f"{yf_symbol}: Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
+                logging.info(f"{yf_symbol}: Recent avg RSI = {recent_avg_rsi:.2f}, Prior avg RSI = {prior_avg_rsi:.2f}, RSI decrease = {rsi_decrease}")
+            except Exception as e:
+                print(f"Error calculating RSI metrics for {yf_symbol}: {e}")
+                logging.error(f"Error calculating RSI metrics for {yf_symbol}: {e}")
+                recent_avg_rsi = 50.00
+                prior_avg_rsi = 50.00
+                rsi_decrease = False
+            previous_price = get_previous_price(sym)
+            price_increase = current_price > previous_price * 1.005
+            print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
+            logging.info(f"{yf_symbol}: Price increase check: Current = ${current_price:.2f}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
+            print(f"Checking price drop for {sym}...")
+            logging.info(f"Checking price drop for {sym}")
+            last_price = min_5_prices.get(sym)
+            if last_price is None:
+                try:
+                    last_price = round(float(df['Close'].iloc[-1].item()), 4)
+                    print(f"No 5-min price found for {yf_symbol}. Using last closing price: {last_price}")
+                    logging.info(f"No 5-min price found for {yf_symbol}. Using last closing price: {last_price}")
+                except Exception as e:
+                    print(f"Error fetching last closing price for {yf_symbol}: {e}")
+                    logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
+                    continue
+            price_decline_threshold = last_price * (1 - 0.002)
+            price_decline = current_price <= price_decline_threshold
+            print(f"{yf_symbol}: Price decline check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
+            logging.info(f"{yf_symbol}: Price decline check: Current = ${current_price:.2f}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
+            short_term_trend = None
+            with price_history_lock:
+                if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
+                    recent_prices = price_history[sym]['5min'][-2:]
+                    short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
+                    print(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+                    logging.info(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+            if detected_patterns and sym in price_history:
+                with price_history_lock:
+                    for interval, prices in price_history[sym].items():
+                        if prices:
+                            print(f"{yf_symbol}: Price history at {interval}: {prices[-5:]}")
+                            logging.info(f"{yf_symbol}: Price history at {interval}: {prices[-5:]}")
+            if not ensure_no_open_orders(sym):
+                print(f"Cannot proceed with {sym} due to unresolved open orders.")
+                logging.info(f"Cannot proceed with {sym} due to unresolved open orders")
+                continue
+            in_uptrend = is_in_uptrend(sym)
+            print(f"{yf_symbol}: Uptrend = {in_uptrend}")
+            logging.info(f"{yf_symbol}: Uptrend = {in_uptrend}")
+            if not in_uptrend:
+                print(f"{yf_symbol} is not in an uptrend. Skipping buy.")
+                logging.info(f"{yf_symbol} is not in an uptrend. Skipping buy")
+                continue
+            with buy_sell_lock:
+                qty = dollar_amount / current_price if FRACTIONAL_BUY_ORDERS else int(dollar_amount / current_price)
+                if qty <= 0:
+                    print(f"Calculated quantity for {sym} is <= 0. Skipping.")
+                    logging.info(f"Calculated quantity for {sym} is <= 0. Skipping")
+                    continue
+                order_id = client_place_order(
+                    symbol=sym,
+                    side="BUY",
+                    amt=dollar_amount if FRACTIONAL_BUY_ORDERS else None,
+                    quantity=qty if not FRACTIONAL_BUY_ORDERS else None,
+                    order_type="MARKET"
+                )
+                if not order_id:
+                    print(f"Failed to place buy order for {sym}.")
+                    logging.info(f"Failed to place buy order for {sym}")
+                    continue
+                status_info = poll_order_status(order_id, timeout=300)
+                if status_info and status_info["status"] == "FILLED":
+                    filled_qty = status_info["filled_qty"]
+                    avg_price = status_info["avg_price"] or current_price
+                    if filled_qty <= 0:
+                        print(f"Buy order for {sym} filled with zero quantity. Skipping.")
+                        logging.info(f"Buy order for {sym} filled with zero quantity. Skipping
