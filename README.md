@@ -67,11 +67,11 @@ I allow callmebot to send me messages
 to the new contact.  
 3. **Receive API Key:** The bot will reply with your personal API key.  
 4. **Set Environment Variables:** Add the following lines to your `.bashrc` file:  
-```bash
+
 export CALLMEBOT_API_KEY='your_api_key'
 export CALLMEBOT_PHONE='+15551231234'
 
-'''
+
 #Replace 'your_api_key' with the API key you received and '+15551231234' with your phone number.
 
 For detailed instructions and the full setup guide, visit CallMeBot API.
