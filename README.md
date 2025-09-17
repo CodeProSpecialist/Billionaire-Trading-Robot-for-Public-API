@@ -71,9 +71,9 @@ to the new contact.
 export CALLMEBOT_API_KEY='your_api_key'
 export CALLMEBOT_PHONE='+15551231234'
 
+'''
 #Replace 'your_api_key' with the API key you received and '+15551231234' with your phone number.
-5. Apply Changes: Run:
-source ~/.bashrc
+
 For detailed instructions and the full setup guide, visit CallMeBot API.
 🚀 Why Choose the Billionaire Strategy Trading Bot?
 Hands-Free Trading: Let the bot execute trades based on your predefined strategy.
