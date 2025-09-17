@@ -31,41 +31,60 @@ python3 auto-copy-stock-list-writer.py
 
 python3 billionaire-strategy-buy-lowest-price-stock-market-robot-for-public.py
 
-📈 Introducing the Billionaire Strategy Trading Bot
-Automate Your Investments with Precision
-Unlock the power of algorithmic trading with the Billionaire Strategy Trading Bot—a Python-based solution designed to execute stock trades on Public.com with unparalleled efficiency.
-🔍 Key Features:
-Smart Order Placement: Automatically identifies and buys the lowest-priced stocks meeting your criteria.
-Fractional Share Support: Invest as little as $1 per trade, maximizing your portfolio's potential.
-Risk Management: Sets stop-loss orders to protect gains and minimize losses.
-Real-Time Monitoring: Continuously tracks market conditions to optimize trading decisions.
-Comprehensive Logging: Keeps detailed records of all trades for transparency and analysis.
-⚙️ Built with Precision:
-Crafted using Python and leveraging the Public.com Trading API, this bot integrates seamlessly with your Public.com account.
-📲 Stay Informed with WhatsApp Alerts:
-Receive instant notifications about your trading activity directly on your phone. The bot integrates with CallMeBot, a free API service that allows you to send WhatsApp messages programmatically.
-Setup Steps:
-Add Contact: Add the phone number +34 644 87 21 57 to your contacts and name it as you wish.
-Send Message: Using WhatsApp, send the message "I allow callmebot to send me messages" to the new contact.
-Receive API Key: The bot will reply with your personal API key.
-Set Environment Variables: Add the following lines to your .bashrc file:
+# 📈 Billionaire Strategy Trading Bot
+
+**Automate Your Investments with Precision**  
+
+Unlock the power of algorithmic trading with the **Billionaire Strategy Trading Bot**—a Python-based solution designed to execute stock trades on Public.com with unparalleled efficiency.
+
+---
+
+## 🔍 Key Features
+
+- **Smart Order Placement:** Automatically identifies and buys the lowest-priced stocks meeting your criteria.  
+- **Fractional Share Support:** Invest as little as $1 per trade, maximizing your portfolio's potential.  
+- **Risk Management:** Sets stop-loss orders to protect gains and minimize losses.  
+- **Real-Time Monitoring:** Continuously tracks market conditions to optimize trading decisions.  
+- **Comprehensive Logging:** Keeps detailed records of all trades for transparency and analysis.  
+
+---
+
+## ⚙️ Built with Precision
+
+Crafted using **Python** and leveraging the **Public.com Trading API**, this bot integrates seamlessly with your Public.com account.
+
+---
+
+## 📲 Stay Informed with WhatsApp Alerts
+
+Receive instant notifications about your trading activity directly on your phone. The bot integrates with **CallMeBot**, a free API service that allows you to send WhatsApp messages programmatically.
+
+### Setup Steps
+
+1. **Add Contact:** Add the phone number `+34 644 87 21 57` to your contacts and name it as you wish.  
+2. **Send Message:** Using WhatsApp, send the message:  
+I allow callmebot to send me messages
+to the new contact.  
+3. **Receive API Key:** The bot will reply with your personal API key.  
+4. **Set Environment Variables:** Add the following lines to your `.bashrc` file:  
+```bash
 export CALLMEBOT_API_KEY='your_api_key'
 export CALLMEBOT_PHONE='+15551231234'
 Replace 'your_api_key' with the API key you received and '+15551231234' with your phone number.
-Apply Changes: Run source ~/.bashrc to apply the changes.
+5. Apply Changes: Run:
+source ~/.bashrc
 For detailed instructions and the full setup guide, visit CallMeBot API.
 🚀 Why Choose the Billionaire Strategy Trading Bot?
 Hands-Free Trading: Let the bot execute trades based on your predefined strategy.
 Optimized for Performance: Designed to identify and capitalize on market opportunities swiftly.
 Secure and Reliable: Built with robust error handling and logging mechanisms.
 Instant Alerts: Stay updated with real-time WhatsApp notifications about your trades.
+⚠️ Legal Disclaimer
+Automated trading involves significant risk. Ensure thorough testing in a simulated environment before deploying with real capital. The information provided is for educational purposes only and does not constitute financial advice. Users are responsible for their own investment decisions.
+🏛️ Unaffiliated Business Disclaimer
+This trading bot is an independent project and is not affiliated with, endorsed by, or sponsored by Public.com, CallMeBot, or any other financial institution. Public.com and CallMeBot are registered trademarks of their respective owners. All trademarks and logos used are the property of their respective owners.
 
-Legal Disclaimer: Automated trading involves significant risk. Ensure thorough testing in a simulated environment before deploying with real capital. The information provided is for educational purposes only and does not constitute financial advice. Users are responsible for their own investment decisions.
-Unaffiliated Business Disclaimer: This trading bot is an independent project and is not affiliated with, endorsed by, or sponsored by Public.com, CallMeBot, or any other financial institution. Public.com and CallMeBot are registered trademarks of their respective owners. All trademarks and logos used are the property of their respective owners.
-
-*This trading robot is an independent software tool developed for educational and personal use. It is not affiliated with, endorsed by, or sponsored by Public.com or Callmebot. Users are responsible for obtaining their own API keys from Public.com and Callmebot, complying with their respective terms of service, and understanding the risks associated with automated trading. Trading involves significant financial risk, and past performance is not indicative of future results. Use this tool at your own discretion and consult a financial advisor before trading.*
-
-Disclaimer:
+*This trading robot is an independent software tool developed for educational and personal use. It is not affiliated with, endorsed by, or sponsored by Public.com or Callmebot. Users are responsible for obtaining their own API keys from Public.com and Callmebot, complying with their respective terms of service, and understanding the risks associated with automated trading. Trading involves significant financial risk, and past performance is not indicative of future results. Use this tool at your own discretion and consult a financial advisor before trading. 
 
 This software is not affiliated with or endorsed by public.com. It aims to be a valuable tool for stock market trading, but all trading involves risks. Use it responsibly and consider seeking advice from financial professionals.
 
