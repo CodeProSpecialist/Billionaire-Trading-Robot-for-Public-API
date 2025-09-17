@@ -1404,4 +1404,241 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                     avg_price = status_info["avg_price"] or current_price
                     if filled_qty <= 0:
                         print(f"Buy order for {sym} filled with zero quantity. Skipping.")
-                        logging.info(f"Buy order for {sym} filled with zero quantity. Skipping
+                        logging.info(f"Buy order for {sym} filled with zero quantity. Skipping")
+                        continue
+                    buy_signal += 1
+                    print(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                    logging.info(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                    with db_lock:
+                        session = SessionLocal()
+                        try:
+                            trade = TradeHistory(
+                                symbols=sym,
+                                action='buy',
+                                quantity=filled_qty,
+                                price=avg_price,
+                                date=today_date_str
+                            )
+                            session.add(trade)
+                            existing_position = session.query(Position).filter_by(symbols=sym).first()
+                            if existing_position:
+                                total_qty = existing_position.quantity + filled_qty
+                                total_cost = (existing_position.quantity * existing_position.avg_price + filled_qty * avg_price)
+                                existing_position.avg_price = total_cost / total_qty if total_qty > 0 else avg_price
+                                existing_position.quantity = total_qty
+                                existing_position.purchase_date = today_date_str
+                            else:
+                                new_position = Position(
+                                    symbols=sym,
+                                    quantity=filled_qty,
+                                    avg_price=avg_price,
+                                    purchase_date=today_date_str
+                                )
+                                session.add(new_position)
+                            session.commit()
+                            print(f"Database updated: Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                            logging.info(f"Database updated: Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                            order_id_stop, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
+                            if order_id_stop:
+                                position = session.query(Position).filter_by(symbols=sym).first()
+                                position.stop_order_id = order_id_stop
+                                position.stop_price = stop_price
+                                session.commit()
+                                print(f"Stop-loss set for {sym}: ${stop_price:.2f}, Order ID: {order_id_stop}")
+                                logging.info(f"Stop-loss set for {sym}: ${stop_price:.2f}, Order ID: {order_id_stop}")
+                        except Exception as e:
+                            session.rollback()
+                            logging.error(f"Error updating database for {sym}: {e}")
+                            print(f"Error updating database for {sym}: {e}")
+                        finally:
+                            session.close()
+                    with open(csv_filename, mode='a', newline='') as csv_file:
+                        csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                        csv_writer.writerow({
+                            'Date': today_date_str,
+                            'Buy': filled_qty,
+                            'Sell': 0,
+                            'Quantity': filled_qty,
+                            'Symbol': sym,
+                            'Price Per Share': avg_price
+                        })
+                    send_alert(
+                        f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
+                        subject=f"Trade Executed: Buy {sym}",
+                        use_whatsapp=True
+                    )
+                    symbols_to_sell_dict[sym] = (avg_price, today_date_str)
+                    symbols_to_remove.append(sym)
+                else:
+                    print(f"Buy order for {sym} not filled or cancelled.")
+                    logging.info(f"Buy order for {sym} not filled or cancelled")
+        for sym in symbols_to_remove:
+            if sym in symbols_to_buy_list:
+                remove_symbols_from_trade_list(sym)
+                print(f"Removed {sym} from buy list after purchase.")
+                logging.info(f"Removed {sym} from buy list after purchase")
+        print(f"\nBuy signals triggered: {buy_signal}")
+        logging.info(f"Buy signals triggered: {buy_signal}")
+        print(f"Buy process completed.")
+        logging.info(f"Buy process completed")
+    except Exception as e:
+        logging.error(f"Error in buy_stocks: {e}")
+        print(f"Error in buy_stocks: {e}")
+        traceback.print_exc()
+    finally:
+        task_running['buy_stocks'] = False
+
+def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
+    if task_running['sell_stocks']:
+        print("sell_stocks already running. Skipping.")
+        logging.info("sell_stocks already running. Skipping")
+        return
+    task_running['sell_stocks'] = True
+    try:
+        print("\nStarting sell_stocks function...")
+        logging.info("Starting sell_stocks function")
+        today_date_str = datetime.today().strftime("%Y-%m-%d")
+        sell_signal = 0
+        with db_lock:
+            session = SessionLocal()
+            try:
+                positions = session.query(Position).all()
+                for pos in positions:
+                    sym = pos.symbols
+                    qty = pos.quantity
+                    avg_price = pos.avg_price
+                    if qty <= 0:
+                        print(f"No quantity to sell for {sym}.")
+                        logging.info(f"No quantity to sell for {sym}")
+                        continue
+                    print(f"\n{'='*60}")
+                    print(f"Processing sell for {sym}...")
+                    print(f"{'='*60}")
+                    logging.info(f"Processing sell for {sym}")
+                    current_price = rate_limited_get_quote(sym)
+                    if current_price is None:
+                        print(f"No valid price data for {sym}. Skipping.")
+                        logging.info(f"No valid price data for {sym}. Skipping")
+                        continue
+                    current_color = GREEN if current_price >= 0 else RED
+                    print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
+                    logging.info(f"Current price for {sym}: ${current_price:.4f}")
+                    yf_symbol = sym.replace('.', '-')
+                    df = rate_limited_yf_history(yf_symbol)
+                    if df.empty or len(df) < 14:
+                        print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
+                        logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping")
+                        continue
+                    df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+                    if len(df) < 14:
+                        print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
+                        logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
+                        continue
+                    close = df['Close'].values
+                    try:
+                        rsi = talib.RSI(close, timeperiod=14)
+                        latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
+                        latest_rsi = round(latest_rsi, 2)
+                        rsi_display = f"{latest_rsi:.2f}"
+                        print(f"Latest RSI for {sym}: {rsi_display}")
+                        logging.info(f"Latest RSI for {sym}: {rsi_display}")
+                    except Exception as e:
+                        print(f"Error calculating RSI for {yf_symbol}: {e}")
+                        logging.error(f"Error calculating RSI for {yf_symbol}: {e}")
+                        latest_rsi = 50.00
+                        print(f"Latest RSI: 50.00")
+                        logging.info(f"Latest RSI: 50.00")
+                    profit_percentage = ((current_price - avg_price) / avg_price * 100) if avg_price else 0
+                    profit_color = GREEN if profit_percentage >= 0 else RED
+                    print(f"{sym}: Profit/Loss = {profit_color}{profit_percentage:.2f}%{RESET}")
+                    logging.info(f"{sym}: Profit/Loss = {profit_percentage:.2f}%")
+                    sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+                    if sell_qty <= 0:
+                        print(f"Calculated sell quantity for {sym} is <= 0. Skipping.")
+                        logging.info(f"Calculated sell quantity for {sym} is <= 0. Skipping")
+                        continue
+                    if not ensure_no_open_orders(sym):
+                        print(f"Cannot proceed with sell for {sym} due to unresolved open orders.")
+                        logging.info(f"Cannot proceed with sell for {sym} due to unresolved open orders")
+                        continue
+                    if pos.stop_order_id:
+                        if client_cancel_order(pos.stop_order_id):
+                            print(f"Cancelled existing stop-loss order {pos.stop_order_id} for {sym}")
+                            logging.info(f"Cancelled existing stop-loss order {pos.stop_order_id} for {sym}")
+                            pos.stop_order_id = None
+                            pos.stop_price = None
+                            session.commit()
+                    with buy_sell_lock:
+                        order_id = client_place_order(
+                            symbol=sym,
+                            side="SELL",
+                            amt=None,
+                            quantity=sell_qty,
+                            order_type="MARKET"
+                        )
+                        if not order_id:
+                            print(f"Failed to place sell order for {sym}.")
+                            logging.info(f"Failed to place sell order for {sym}")
+                            continue
+                        status_info = poll_order_status(order_id, timeout=300)
+                        if status_info and status_info["status"] == "FILLED":
+                            filled_qty = status_info["filled_qty"]
+                            avg_sell_price = status_info["avg_price"] or current_price
+                            if filled_qty <= 0:
+                                print(f"Sell order for {sym} filled with zero quantity. Skipping.")
+                                logging.info(f"Sell order for {sym} filled with zero quantity. Skipping")
+                                continue
+                            sell_signal += 1
+                            print(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${avg_sell_price:.2f}")
+                            logging.info(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${avg_sell_price:.2f}")
+                            trade = TradeHistory(
+                                symbols=sym,
+                                action='sell',
+                                quantity=filled_qty,
+                                price=avg_sell_price,
+                                date=today_date_str
+                            )
+                            session.add(trade)
+                            pos.quantity -= filled_qty
+                            if pos.quantity <= 0:
+                                session.delete(pos)
+                            session.commit()
+                            with open(csv_filename, mode='a', newline='') as csv_file:
+                                csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                                csv_writer.writerow({
+                                    'Date': today_date_str,
+                                    'Buy': 0,
+                                    'Sell': filled_qty,
+                                    'Quantity': filled_qty,
+                                    'Symbol': sym,
+                                    'Price Per Share': avg_sell_price
+                                })
+                            send_alert(
+                                f"Sold {filled_qty:.4f} shares of {sym} at ${avg_sell_price:.2f}",
+                                subject=f"Trade Executed: Sell {sym}",
+                                use_whatsapp=True
+                            )
+                            if sym in symbols_to_sell_dict:
+                                del symbols_to_sell_dict[sym]
+                            print(f"Database updated: Sold {filled_qty:.4f} shares of {sym} at ${avg_sell_price:.2f}")
+                            logging.info(f"Database updated: Sold {filled_qty:.4f} shares of {sym} at ${avg_sell_price:.2f}")
+                        else:
+                            print(f"Sell order for {sym} not filled or cancelled.")
+                            logging.info(f"Sell order for {sym} not filled or cancelled")
+                print(f"\nSell signals triggered: {sell_signal}")
+                logging.info(f"Sell signals triggered: {sell_signal}")
+                print(f"Sell process completed.")
+                logging.info(f"Sell process completed")
+            except Exception as e:
+                session.rollback()
+                logging.error(f"Error in sell_stocks: {e}")
+                print(f"Error in sell_stocks: {e}")
+            finally:
+                session.close()
+    except Exception as e:
+        logging.error(f"Error in sell_stocks: {e}")
+        print(f"Error in sell_stocks: {e}")
+        traceback.print_exc()
+    finally:
+        task_running['sell_stocks'] = False
+
