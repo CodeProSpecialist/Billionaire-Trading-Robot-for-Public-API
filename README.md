@@ -70,7 +70,8 @@ to the new contact.
 ```bash
 export CALLMEBOT_API_KEY='your_api_key'
 export CALLMEBOT_PHONE='+15551231234'
-Replace 'your_api_key' with the API key you received and '+15551231234' with your phone number.
+
+#Replace 'your_api_key' with the API key you received and '+15551231234' with your phone number.
 5. Apply Changes: Run:
 source ~/.bashrc
 For detailed instructions and the full setup guide, visit CallMeBot API.
