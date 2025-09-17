@@ -196,40 +196,93 @@ def _fetch_current_price_public(symbol):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def client_place_order(symbol, qty, side, order_type="MARKET", limit_price=None, stop_price=None):
+def preflight_single_leg(symbol: str, side: str, amt: float = None, quantity: float = None,
+                         ord_type: str = "MARKET", time_in_force: str = "DAY", limit_price: float = None, stop_price: float = None) -> dict:
+    """
+    Public.com preflight: validate an order before placing.
+    Use amt for fractional buys, quantity for share orders.
+    """
+    url = f"{BASE_URL}/orders/preflight/single_leg"
+    payload = {
+        "accountId": account_id,
+        "ticker": symbol,
+        "symType": "EQUITY",
+        "side": side.upper(),
+        "ordType": ord_type,
+        "timeInForce": time_in_force
+    }
+    if amt is not None:
+        payload["amt"] = f"{amt:.2f}"
+    elif quantity is not None:
+        payload["qty"] = str(quantity)
+    if limit_price is not None:
+        payload["limitPrice"] = str(limit_price)
+    if stop_price is not None:
+        payload["stopPrice"] = str(stop_price)
+
+    try:
+        resp = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logging.error(f"Preflight error for {symbol}: {e}")
+        return {"error": str(e)}
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def place_order(preflight: dict, client_order_id: str = None, limit_price: float = None, stop_price: float = None) -> dict:
+    """
+    Place an order using the preflight result.
+    """
+    url = f"{BASE_URL}/orders"
+    payload = {
+        "clientOrderId": client_order_id or str(uuid4()),
+        "instrument": {"symbol": preflight.get("ticker"), "type": "EQUITY"},
+        "orderSide": preflight.get("side", "BUY").upper(),
+        "orderType": preflight.get("ordType", "MARKET").upper(),
+        "expiration": {
+            "timeInForce": preflight.get("timeInForce", "DAY"),
+            "expirationTime": (datetime.now(eastern) + timedelta(days=1)).isoformat() + "Z"
+        }
+    }
+    if preflight.get("amt"):
+        payload["amt"] = str(preflight["amt"])
+    elif preflight.get("qty"):
+        payload["quantity"] = str(preflight["qty"])
+    if limit_price is not None:
+        payload["limitPrice"] = str(limit_price)
+    if stop_price is not None:
+        payload["stopPrice"] = str(stop_price)
+
+    try:
+        resp = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logging.error(f"Order placement failed: {e}")
+        return {"error": str(e)}
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def client_place_order(symbol, side, amt=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
     try:
         if not account_id:
             logging.error("No BROKERAGE accountId")
             return None
-        order_id = str(uuid4())
-        request_body = {
-            "orderId": order_id,
-            "instrument": {
-                "symbol": symbol,
-                "type": "EQUITY"
-            },
-            "orderSide": side.upper(),
-            "orderType": order_type.upper(),
-            "expiration": {
-                "timeInForce": "DAY",
-                "expirationTime": (datetime.now(eastern) + timedelta(days=1)).isoformat() + "Z"
-            },
-            "quantity": str(qty) if qty else None,
-            "amount": None,
-            "limitPrice": str(limit_price) if limit_price else None,
-            "stopPrice": str(stop_price) if stop_price else None,
-            "openCloseIndicator": "OPEN"
-        }
-        request_body = {k: v for k, v in request_body.items() if v is not None}
-        url = f"{BASE_URL}/trading/{account_id}/order"
-        resp = requests.post(url, headers=HEADERS, json=request_body, timeout=10)
-        resp.raise_for_status()
-        order_response = resp.json()
-        if order_response.get('quantity') != str(qty) or order_response.get('orderSide') != side.upper():
-            logging.error(f"Order mismatch for {symbol}: Expected qty={qty}, side={side}")
+        pf = preflight_single_leg(symbol, side, amt=amt, quantity=quantity, ord_type=order_type, limit_price=limit_price, stop_price=stop_price)
+        if pf.get('error'):
+            logging.error(f"Preflight failed for {symbol}: {pf['error']}")
             return None
-        logging.info(f"Order placed: {side} {qty} of {symbol}, Order ID: {order_response.get('orderId')}")
-        return order_response.get('orderId')
+        order_response = place_order(pf, limit_price=limit_price, stop_price=stop_price)
+        if order_response.get('error'):
+            logging.error(f"Order placement error for {symbol}: {order_response['error']}")
+            return None
+        order_id = order_response.get('orderId') or order_response.get('clientOrderId')
+        if amt is not None:
+            logging.info(f"Order placed: {side} ${amt:.2f} of {symbol}, Order ID: {order_id}")
+        else:
+            logging.info(f"Order placed: {side} {quantity} shares of {symbol}, Order ID: {order_id}")
+        return order_id
     except Exception as e:
         logging.error(f"Order placement error for {symbol}: {e}")
         return None
@@ -241,7 +294,7 @@ def client_get_order_status(order_id):
         if not account_id or not order_id:
             logging.error("No account_id or order_id")
             return None
-        url = f"{BASE_URL}/trading/{account_id}/order/{order_id}"
+        url = f"{BASE_URL}/orders/{order_id}"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         order_data = resp.json()
@@ -267,7 +320,7 @@ def client_cancel_order(order_id):
         if not account_id or not order_id:
             logging.error("No account_id or order_id")
             return False
-        url = f"{BASE_URL}/trading/{account_id}/order/{order_id}"
+        url = f"{BASE_URL}/orders/{order_id}"
         resp = requests.delete(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         logging.info(f"Order {order_id} cancelled successfully")
@@ -393,7 +446,7 @@ def client_list_open_orders():
         if not account_id:
             logging.error("No BROKERAGE accountId")
             return []
-        url = f"{BASE_URL}/trading/{account_id}/orders"
+        url = f"{BASE_URL}/orders"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         orders = resp.json().get('orders', [])
@@ -849,15 +902,15 @@ def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
             return None, None
         stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
         stop_color = GREEN if stop_price >= 0 else RED
-        if float(qty) != int(qty) and not FRACTIONAL_BUY_ORDERS:
-            logging.error(f"Skipped stop-loss for {symbol}: Fractional qty {qty:.4f} not allowed.")
-            print(f"Skipped stop-loss for {symbol}: Fractional qty {qty:.4f} not allowed.")
+        sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+        if sell_qty == 0:
+            logging.error(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
+            print(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
             return None, None
-        order_id = client_place_order(symbol, int(qty) if not FRACTIONAL_BUY_ORDERS else qty,
-                                     "SELL", order_type="STOP_MARKET", stop_price=stop_price)
+        order_id = client_place_order(symbol, "SELL", quantity=sell_qty, order_type="STOP_MARKET", stop_price=stop_price)
         if order_id:
-            print(f"Placed stop-loss order for {qty:.4f} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
-            logging.info(f"Placed stop-loss for {qty:.4f} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
+            print(f"Placed stop-loss order for {sell_qty:.4f} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
+            logging.info(f"Placed stop-loss for {sell_qty:.4f} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
             return order_id, stop_price
         return None, None
     except Exception as e:
@@ -1150,6 +1203,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             return
         min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
         day_5_prices = get_last_price_within_past_5_days(valid_symbols)
+        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
+            dollar_amount = 1.0
+        else:
+            dollar_amount = max_new_exposure / len(valid_symbols)
+        if dollar_amount <= 0:
+            print("Calculated dollar amount for buys is <= 0. Skipping buys.")
+            logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
+            return
         for sym in valid_symbols:
             print(f"\n{'='*60}")
             print(f"Processing {sym}...")
@@ -1414,23 +1475,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             logging.info(f"{yf_symbol}: Buy signal confirmed with score = {score}")
             buy_signal += 1
             with buy_sell_lock:
-                if ALL_BUY_ORDERS_ARE_1_DOLLAR:
-                    qty = round(1.0 / current_price, 4) if current_price > 0 else 0
-                else:
-                    equity_per_stock = max_new_exposure / len(valid_symbols)
-                    qty = round(equity_per_stock / current_price, 4) if current_price > 0 else 0
-                if qty <= 0:
-                    print(f"Calculated quantity for {sym} is {qty}. Skipping.")
-                    logging.info(f"Calculated quantity for {sym} is {qty}. Skipping")
+                if dollar_amount <= 0:
+                    print(f"Calculated dollar amount for {sym} is {dollar_amount}. Skipping.")
+                    logging.info(f"Calculated dollar amount for {sym} is {dollar_amount}. Skipping")
                     continue
-                if not FRACTIONAL_BUY_ORDERS:
-                    qty = int(qty)
-                    if qty == 0:
-                        print(f"Fractional shares disabled and qty < 1 for {sym}. Skipping.")
-                        logging.info(f"Fractional shares disabled and qty < 1 for {sym}. Skipping")
-                        continue
-            with buy_sell_lock:
-                order_id = client_place_order(sym, qty, "BUY", order_type="MARKET")
+                order_id = client_place_order(sym, "BUY", amt=dollar_amount)
                 if not order_id:
                     print(f"Failed to place buy order for {sym}.")
                     logging.error(f"Failed to place buy order for {sym}")
@@ -1439,9 +1488,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 if status_info and status_info["status"] == "FILLED":
                     filled_qty = status_info["filled_qty"]
                     avg_price = status_info["avg_price"] or current_price
-                    if filled_qty <= 0:
-                        print(f"Buy order for {sym} filled with qty {filled_qty}. Skipping DB update.")
-                        logging.info(f"Buy order for {sym} filled with qty {filled_qty}. Skipping DB update")
+                    estimated_shares = dollar_amount / avg_price
+                    if filled_qty <= 0 or abs(filled_qty - estimated_shares) > 0.01:  # Tolerance for fractional
+                        print(f"Buy order for {sym} filled with unexpected qty {filled_qty} (expected ~{estimated_shares:.4f}). Skipping DB update.")
+                        logging.info(f"Buy order for {sym} filled with unexpected qty {filled_qty}. Skipping DB update")
                         continue
                     with db_lock:
                         session = SessionLocal()
@@ -1470,8 +1520,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                             )
                             session.add(trade)
                             session.commit()
-                            print(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
-                            logging.info(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                            print(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f} (used ${dollar_amount:.2f})")
+                            logging.info(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f} (used ${dollar_amount:.2f})")
                             with open(csv_filename, mode='a', newline='') as csv_file:
                                 csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                 csv_writer.writerow({
@@ -1483,7 +1533,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                     'Price Per Share': avg_price
                                 })
                             send_alert(
-                                f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
+                                f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f} (used ${dollar_amount:.2f})",
                                 subject=f"Buy Executed: {sym}",
                                 use_whatsapp=True
                             )
@@ -1631,7 +1681,7 @@ def sell_stocks(symbols_to_sell_dict):
                         logging.info(f"Cannot proceed with sell for {symbol} due to open orders")
                         continue
                     with buy_sell_lock:
-                        order_id = client_place_order(symbol, sell_qty, "SELL", order_type="MARKET")
+                        order_id = client_place_order(symbol, "SELL", quantity=sell_qty)
                         if not order_id:
                             print(f"Failed to place sell order for {symbol}.")
                             logging.error(f"Failed to place sell order for {symbol}")
@@ -1747,4 +1797,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
