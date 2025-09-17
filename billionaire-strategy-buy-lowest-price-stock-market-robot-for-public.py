@@ -196,12 +196,22 @@ def _fetch_current_price_public(symbol):
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
-def preflight_single_leg(symbol: str, side: str, amt: float = None, quantity: float = None,
-                         ord_type: str = "MARKET", time_in_force: str = "DAY", limit_price: float = None, stop_price: float = None) -> dict:
+def preflight_single_leg(
+    symbol: str,
+    side: str,
+    amt: float = None,
+    quantity: float = None,
+    ord_type: str = "MARKET",
+    time_in_force: str = "DAY",
+    limit_price: float = None,
+    stop_price: float = None
+) -> dict:
     """
     Public.com preflight: validate an order before placing.
-    Use amt for fractional buys, quantity for share orders.
+    Use amt for fractional buys (mapped to 'notional'),
+    or quantity for share orders.
     """
+
     url = f"{BASE_URL}/orders/preflight/single_leg"
     payload = {
         "accountId": account_id,
@@ -211,10 +221,13 @@ def preflight_single_leg(symbol: str, side: str, amt: float = None, quantity: fl
         "ordType": ord_type,
         "timeInForce": time_in_force
     }
+
+    # Map amt → notional for fractional orders
     if amt is not None:
-        payload["amt"] = f"{amt:.2f}"
+        payload["notional"] = f"{amt:.2f}"
     elif quantity is not None:
         payload["qty"] = str(quantity)
+
     if limit_price is not None:
         payload["limitPrice"] = str(limit_price)
     if stop_price is not None:
@@ -227,6 +240,7 @@ def preflight_single_leg(symbol: str, side: str, amt: float = None, quantity: fl
     except Exception as e:
         logging.error(f"Preflight error for {symbol}: {e}")
         return {"error": str(e)}
+
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
