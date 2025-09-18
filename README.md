@@ -62,9 +62,9 @@ Receive instant notifications about your trading activity directly on your phone
 ### Setup Steps
 
 1. **Add Contact:** Add the phone number `+34 644 87 21 57` to your contacts and name it as you wish.  
-2. **Send Message:** Using WhatsApp, send the message:  
+2. **Send Message:** Using WhatsApp, send the message to the new contact for callmebot:  
 I allow callmebot to send me messages
-to the new contact.  
+  
 3. **Receive API Key:** The bot will reply with your personal API key.  
 4. **Set Environment Variables:** Add the following lines to your `.bashrc` file:  
 
