@@ -37,7 +37,7 @@ PRINT_SYMBOLS_TO_BUY = False  # Set to False for faster execution
 PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE = True  # Set to True to view database
 PRINT_DATABASE = True  # Set to True to view stocks to sell
 DEBUG = False  # Set to False for faster execution
-ALL_BUY_ORDERS_ARE_1_DOLLAR = False  # When True, every buy order is a $1.00 fractional share market day order
+ALL_BUY_ORDERS_ARE_5_DOLLARS = False  # When True, every buy order is a $1.00 fractional share market day order
 FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
 
 # Global variables
@@ -1204,8 +1204,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             return
         min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
         day_5_prices = get_last_price_within_past_5_days(valid_symbols)
-        if ALL_BUY_ORDERS_ARE_1_DOLLAR:
-            dollar_amount = 1.0
+        if ALL_BUY_ORDERS_ARE_5_DOLLARS:
+            dollar_amount = 5.0
         else:
             dollar_amount = max_new_exposure / len(valid_symbols)
         if dollar_amount <= 0:
