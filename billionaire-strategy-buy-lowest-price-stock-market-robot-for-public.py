@@ -1456,6 +1456,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                     buy_signal += 1
                     print(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                     logging.info(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                    send_alert(
+                                f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
+                                subject=f"Trade Executed: {sym}"
+                    )
                     with db_lock:
                         session = SessionLocal()
                         try:
@@ -1498,10 +1502,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                     'Symbol': sym,
                                     'Price Per Share': avg_price
                                 })
-                            send_alert(
-                                f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                subject=f"Trade Executed: {sym}"
-                            )
+                            
                             print(f"Buy recorded in CSV and DB for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                             logging.info(f"Buy recorded for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                             symbols_to_remove.append(sym)
