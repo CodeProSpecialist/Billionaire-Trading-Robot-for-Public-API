@@ -1092,12 +1092,12 @@ def send_alert(message, subject="Trading Bot Alert"):
     url = f"https://api.callmebot.com/whatsapp.php?phone={phone}&text={encoded_message}&apikey={api_key}"
 
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)  # Added timeout for safety
         if response.status_code == 200:
             print(f"WhatsApp alert sent: {subject}")
             logging.info(f"WhatsApp alert sent: {subject}")
         else:
-            print(f" Failed to send WhatsApp alert: {response.text}")
+            print(f"Failed to send WhatsApp alert: {response.text}")
             logging.error(f"Failed to send WhatsApp alert: {response.text}")
     except Exception as e:
         logging.error(f"Error sending WhatsApp alert: {e}")
