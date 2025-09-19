@@ -1048,8 +1048,7 @@ def check_price_moves():
                         direction = "up" if pct_change > 0 else "down"
                         send_alert(
                             f"{pos.symbols} moved {pct_change:.2f}% {direction} from avg ${pos.avg_price:.2f} to ${current_price:.2f}",
-                            subject=f"Price Alert: {pos.symbols}",
-                            use_whatsapp=True
+                            subject=f"Price Alert: {pos.symbols}"
                         )
             except Exception as e:
                 session.rollback()
@@ -1718,8 +1717,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                 })
                             send_alert(
                                 f"Sold {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                subject=f"Trade Executed: {sym}",
-                                use_whatsapp=True
+                                subject=f"Trade Executed: {sym}"
                             )
                             print(f"Sell recorded in CSV and DB for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                             logging.info(f"Sell recorded for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
