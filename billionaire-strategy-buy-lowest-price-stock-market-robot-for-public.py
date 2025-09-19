@@ -1502,8 +1502,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                 })
                             send_alert(
                                 f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                subject=f"Trade Executed: {sym}",
-                                use_whatsapp=True
+                                subject=f"Trade Executed: {sym}"
                             )
                             print(f"Buy recorded in CSV and DB for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                             logging.info(f"Buy recorded for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
