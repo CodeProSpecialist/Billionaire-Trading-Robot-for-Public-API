@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, date, timezone
 from datetime import time as time2
 import pytz
 import requests
+import urllib.parse
 import json
 import yfinance as yf
 import talib
