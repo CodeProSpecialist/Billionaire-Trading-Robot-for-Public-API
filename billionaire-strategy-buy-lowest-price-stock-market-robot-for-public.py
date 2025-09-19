@@ -1773,6 +1773,10 @@ def main_loop():
             logging.error(f"Error in main loop: {e}")
             print(f"Error in main loop: {e}")
             traceback.print_exc()
+            send_alert(
+                f"Trading Robot Error in main loop: {e} ",
+                subject=f"Alert "
+            )
             time.sleep(60)
 
 if __name__ == "__main__":
