@@ -1760,6 +1760,10 @@ def main_loop():
     schedule.every(5).minutes.do(sell_stocks, symbols_to_sell_dict, buy_sell_lock)
     schedule.every(5).minutes.do(print_database_tables)
     print("\nStarting main trading loop...")
+    send_alert(
+        f"Trading Robot is Starting the main trading loop. ",
+        subject=f"Alert | "
+    )
     logging.info("Starting main trading loop")
     while True:
         try:
