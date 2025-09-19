@@ -11,6 +11,8 @@ import pytz
 import requests
 import urllib.parse
 import json
+import importlib.util
+import sys
 import yfinance as yf
 import talib
 import pandas_market_calendars as mcal
