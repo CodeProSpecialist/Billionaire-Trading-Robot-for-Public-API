@@ -1065,31 +1065,38 @@ def poll_order_status(order_id, timeout=300):
     print(f"Order {order_id} status check timed out after {timeout} seconds.")
     return None
 
-def send_alert(message, subject="Trading Bot Alert", use_whatsapp=True):
+def send_alert(message, subject="Trading Bot Alert"):
+    """
+    Sends a WhatsApp alert using CallMeBot API with environment variables.
+    Env vars required:
+      - CALLMEBOT_API_KEY
+      - CALLMEBOT_PHONE
+    """
+    api_key = os.getenv("CALLMEBOT_API_KEY")
+    phone = os.getenv("CALLMEBOT_PHONE")
+
+    if not api_key or not phone:
+        logging.error("Missing CALLMEBOT_API_KEY or CALLMEBOT_PHONE environment variable.")
+        print("Missing CALLMEBOT_API_KEY or CALLMEBOT_PHONE environment variable.")
+        return
+
     full_message = f"{subject}: {message}"
-    logging.info(f"Alert: {full_message}")
-    print(f"{YELLOW}ALERT: {full_message}{RESET}")
-    if use_whatsapp:
-        api_key = os.getenv('CALLMEBOT_API_KEY')
-        phone = os.getenv('CALLMEBOT_PHONE')
-        if api_key and phone:
-            try:
-                url = "https://api.callmebot.com/whatsapp.php"
-                params = {
-                    "phone": phone,
-                    "text": full_message,
-                    "apikey": api_key
-                }
-                response = requests.get(url, params=params)
-                if response.status_code == 200:
-                    print(f"WhatsApp alert sent: {subject}")
-                    logging.info(f"WhatsApp alert sent: {subject}")
-                else:
-                    print(f"Failed to send WhatsApp alert: {response.text}")
-                    logging.error(f"Failed to send WhatsApp alert: {response.text}")
-            except Exception as e:
-                logging.error(f"Error sending WhatsApp alert: {e}")
-                print(f"Error sending WhatsApp alert: {e}")
+    encoded_message = urllib.parse.quote_plus(full_message)
+
+    # Build the full URL with env vars
+    url = f"https://api.callmebot.com/whatsapp.php?phone={phone}&text={encoded_message}&apikey={api_key}"
+
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            print(f"WhatsApp alert sent: {subject}")
+            logging.info(f"WhatsApp alert sent: {subject}")
+        else:
+            print(f" Failed to send WhatsApp alert: {response.text}")
+            logging.error(f"Failed to send WhatsApp alert: {response.text}")
+    except Exception as e:
+        logging.error(f"Error sending WhatsApp alert: {e}")
+        print(f"Error sending WhatsApp alert: {e}")
 
 def stop_if_stock_market_is_closed():
     nyse = mcal.get_calendar('NYSE')
