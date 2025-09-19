@@ -992,8 +992,7 @@ def check_stop_order_status():
                         filled_price = status_info["avg_price"] or client_get_quote(pos.symbols)
                         send_alert(
                             f"Stop-loss triggered for {pos.symbols}: {filled_qty:.4f} shares sold at ${filled_price:.2f}",
-                            subject=f"Stop-Loss Triggered: {pos.symbols}",
-                            use_whatsapp=True
+                            subject=f"Stop-Loss Triggered: {pos.symbols}"
                         )
                         trade = TradeHistory(
                             symbols=pos.symbols,
