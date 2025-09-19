@@ -45,6 +45,11 @@ FRACTIONAL_BUY_ORDERS = True  # Enable fractional share orders
 
 # Global variables
 YOUR_SECRET_KEY = os.getenv("YOUR_SECRET_KEY")
+
+# call me bot API variables 
+api_key = os.getenv("CALLMEBOT_API_KEY")
+phone = os.getenv("CALLMEBOT_PHONE")
+
 secret = None
 access_token = None
 account_id = None
