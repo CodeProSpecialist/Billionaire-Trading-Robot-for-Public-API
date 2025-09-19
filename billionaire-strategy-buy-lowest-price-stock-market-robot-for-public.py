@@ -1762,7 +1762,7 @@ def main_loop():
     print("\nStarting main trading loop...")
     send_alert(
         f"Trading Robot is Starting the main trading loop. ",
-        subject=f"Alert | "
+        subject=f"Alert "
     )
     logging.info("Starting main trading loop")
     while True:
