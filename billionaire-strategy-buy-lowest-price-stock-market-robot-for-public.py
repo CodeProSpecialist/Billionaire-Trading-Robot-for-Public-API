@@ -1710,9 +1710,9 @@ def main():
             monitor_thread.join()
             price_thread.join()
             stop_order_thread.join()
-            print("\nAll threads completed. Sleeping for 300 seconds before next cycle...")
-            logging.info("All threads completed. Sleeping for 300 seconds before next cycle.")
-            time.sleep(300)
+            print("\nAll threads completed. Sleeping for 45 seconds before next cycle...")
+            logging.info("All threads completed. Sleeping for 45 seconds before next cycle.")
+            time.sleep(45)
         except KeyboardInterrupt:
             print("\nReceived KeyboardInterrupt. Shutting down gracefully...")
             logging.info("Received KeyboardInterrupt. Shutting down gracefully.")
