@@ -1380,6 +1380,7 @@ def run_scheduled_tasks():
 def main():
     print("Starting main function...")
     logging.info("Starting main function")
+    fetch_token_and_account()
     initialize_csv()
     initialize_alerts_log()
     if not YOUR_SECRET_KEY:
