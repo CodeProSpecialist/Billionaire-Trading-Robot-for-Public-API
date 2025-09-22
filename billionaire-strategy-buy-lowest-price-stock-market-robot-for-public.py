@@ -1391,6 +1391,7 @@ def run_scheduled_tasks():
 def main():
     print("Starting main function...")
     logging.info("Starting main function")
+    refresh_token_if_needed()
     fetch_token_and_account()
     initialize_csv()
     initialize_alerts_log()
