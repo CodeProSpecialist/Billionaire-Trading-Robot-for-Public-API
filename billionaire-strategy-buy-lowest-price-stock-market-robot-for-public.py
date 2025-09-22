@@ -82,7 +82,7 @@ data_cache = {}
 CACHE_EXPIRY = 120  # 2 minutes
 CALLS = 10  # Max API calls per period
 PERIOD = 1  # Period in seconds
-RETRY_COUNT = 3  # Retry failed cancellations
+RETRY_COUNT = 5  # Retry failed cancellations
 db_lock = threading.Lock()  # Database lock for thread safety
 price_history_lock = threading.Lock()  # Lock for price_history and last_stored
 task_running = {
@@ -242,6 +242,55 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
         traceback.print_exc()
         return {"error": str(e)}
 
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
+    try:
+        if not account_id:
+            logging.error("No BROKERAGE accountId")
+            return None
+        logging.info(f"Placing {side} order for {symbol}: amount={amount}, quantity={quantity}, order_type={order_type}, stop_price={stop_price}")
+        if order_type == "MARKET":
+            order_response = place_market_order(
+                symbol=symbol,
+                side=side,
+                fractional=FRACTIONAL_BUY_ORDERS if amount is not None else False,
+                amount=amount,
+                quantity=quantity
+            )
+        else:  # STOP
+            url = f"{BASE_URL}/trading/{account_id}/order"
+            order_id = str(uuid4())
+            payload = {
+                "orderId": order_id,
+                "instrument": {"symbol": symbol, "type": "EQUITY"},
+                "orderSide": side.upper(),
+                "orderType": "STOP",
+                "stopPrice": stop_price,
+                "quantity": f"{quantity:.4f}" if quantity % 1 != 0 else str(int(quantity)),
+                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
+            }
+            response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+            if response.status_code >= 400:
+                print(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
+                logging.error(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
+                return {"error": f"HTTP {response.status_code}: {response.text}"}
+            response.raise_for_status()
+            order_response = response.json()
+            logging.info(f"Stop sell order placed successfully for {symbol}: {order_response}")
+        if order_response.get('error'):
+            logging.error(f"Order placement error for {symbol}: {order_response['error']}")
+            return None
+        order_id = order_response.get('orderId')
+        if amount is not None:
+            logging.info(f"Order placed: {side} ${amount:.2f} of {symbol}, Order ID: {order_id}")
+        else:
+            logging.info(f"Order placed: {side} {quantity} shares of {symbol}, Order ID: {order_id}")
+        return order_id
+    except Exception as e:
+        logging.error(f"Order placement error for {symbol}: {e}")
+        return None
+
 def get_expiration():
     """Return expirationTime string for GTD orders (full-share), skip weekends"""
     exp = datetime.now(timezone.utc) + timedelta(days=30)
@@ -325,7 +374,7 @@ def client_cancel_order(order):
                 except:
                     print("  Response text:", e.response.text)
             if attempt < RETRY_COUNT:
-                time.sleep(2)
+                time.sleep(2 ** attempt)
             else:
                 print(f"Giving up on order {order_id} after {RETRY_COUNT} attempts.")
                 return False
@@ -501,6 +550,8 @@ def sync_db_with_api():
                 for pos in api_positions:
                     symbol = pos['symbol']
                     qty = pos['qty']
+                    if qty <= 0:
+                        continue
                     avg_price = pos['avg_entry_price']
                     purchase_date = pos['purchase_date']
                     db_pos = session.query(Position).filter_by(symbols=symbol).first()
@@ -516,13 +567,10 @@ def sync_db_with_api():
                         )
                         session.add(db_pos)
                 for db_pos in session.query(Position).all():
-                    if db_pos.symbols not in api_symbols and db_pos.quantity <= 0:
-                        positions_to_delete.append(db_pos)
-                time.sleep(5)
-                for db_pos in positions_to_delete:
-                    if db_pos.stop_order_id:
-                        client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
-                    session.delete(db_pos)
+                    if db_pos.symbols not in api_symbols or db_pos.quantity <= 0:
+                        if db_pos.stop_order_id:
+                            client_cancel_order({'orderId': db_pos.stop_order_id, 'instrument': {'symbol': db_pos.symbols}})
+                        session.delete(db_pos)
                 session.commit()
                 print("Database synced with API.")
             except Exception as e:
@@ -855,6 +903,33 @@ def remove_symbols_from_trade_list(symbol):
         logging.error(f"Error removing {symbol} from trade list: {e}")
         print(f"Error removing {symbol} from trade list: {e}")
 
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
+    try:
+        atr = get_average_true_range(symbol)
+        if atr is None:
+            logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
+            print(f"No ATR for {symbol}. Skipping stop-loss.")
+            return None, None
+        stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
+        stop_color = GREEN if stop_price >= 0 else RED
+        sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+        if sell_qty == 0:
+            logging.error(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
+            print(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
+            return None, None
+        order_id = client_place_order(symbol, "SELL", quantity=sell_qty, order_type="STOP_MARKET", stop_price=stop_price)
+        if order_id:
+            print(f"Placed stop-loss order for {sell_qty:.4f} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
+            logging.info(f"Placed stop-loss for {sell_qty:.4f} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
+            return order_id, stop_price
+        return None, None
+    except Exception as e:
+        logging.error(f"Error placing stop-loss for {symbol}: {e}")
+        print(f"Error placing stop-loss for {symbol}: {e}")
+        return None, None
+
 def monitor_stop_losses():
     if task_running['monitor_stop_losses']:
         print("monitor_stop_losses already running. Skipping.")
@@ -1094,12 +1169,15 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         buy_signal = 0
         acc = client_get_account()
         total_equity = acc['equity']
-        buying_power = float(acc['buying_power_cash'])  # Fetch buying power
-        print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-        logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-        if buying_power <= 5.00:
-            print("Buying power <= $5.00. Skipping all buys.")
-            logging.info("Buying power <= $5.00. Skipping all buys.")
+        buying_power = float(acc['buying_power_cash'])
+        # Reserve $5.00 to ensure minimum buying power is maintained
+        reserved_buying_power = 5.00
+        available_buying_power = buying_power - reserved_buying_power
+        print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}, Available after reserving ${reserved_buying_power:.2f}: ${available_buying_power:.2f}")
+        logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}, Available after reserving ${reserved_buying_power:.2f}: ${available_buying_power:.2f}")
+        if available_buying_power <= 0:
+            print(f"Available buying power after reserving ${reserved_buying_power:.2f} is ${available_buying_power:.2f}. Skipping all buys.")
+            logging.info(f"Available buying power after reserving ${reserved_buying_power:.2f} is ${available_buying_power:.2f}. Skipping all buys.")
             return
         positions = client_list_positions()
         current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
@@ -1107,6 +1185,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         exposure_color = GREEN if max_new_exposure >= 0 else RED
         print(f"Current exposure: ${current_exposure:.2f}, Max new exposure: {exposure_color}${max_new_exposure:.2f}{RESET}")
         logging.info(f"Current exposure: ${current_exposure:.2f}, Max new exposure: ${max_new_exposure:.2f}")
+        print(f"Debug: total_equity=${total_equity:.2f}, current_exposure=${current_exposure:.2f}, max_new_exposure=${max_new_exposure:.2f}, valid_symbols={len(symbols_to_buy_list)}")
+        logging.info(f"Debug: total_equity=${total_equity:.2f}, current_exposure=${current_exposure:.2f}, max_new_exposure=${max_new_exposure:.2f}, valid_symbols={len(symbols_to_buy_list)}")
         if max_new_exposure <= 0:
             print("Portfolio exposure limit reached. No new buys.")
             logging.info("Portfolio exposure limit reached.")
@@ -1116,7 +1196,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         logging.info("Filtering valid symbols for buying")
         for sym in symbols_to_buy_list:
             current_price = rate_limited_get_quote(sym)
-            if current_price is None:
+            if current_price is None or current_price <= 0:
                 print(f"No valid price data for {sym}. Skipping.")
                 logging.info(f"No valid price data for {sym}. Skipping")
                 continue
@@ -1137,10 +1217,21 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         if ALL_BUY_ORDERS_ARE_5_DOLLARS:
             dollar_amount = 5.0
         else:
-            dollar_amount = max_new_exposure / len(valid_symbols)
+            # Calculate dollar_amount ensuring reserved buying power
+            dollar_amount = max_new_exposure / len(valid_symbols) if len(valid_symbols) > 0 else 0
+            # Adjust dollar_amount to not exceed available_buying_power
+            total_planned_spend = dollar_amount * len(valid_symbols)
+            if total_planned_spend > available_buying_power:
+                dollar_amount = available_buying_power / len(valid_symbols) if len(valid_symbols) > 0 else 0
+                print(f"Adjusted dollar_amount to ${dollar_amount:.2f} to maintain ${reserved_buying_power:.2f} buying power")
+                logging.info(f"Adjusted dollar_amount to ${dollar_amount:.2f} to maintain ${reserved_buying_power:.2f} buying power")
         if dollar_amount <= 0:
-            print("Calculated dollar amount for buys is <= 0. Skipping buys.")
-            logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
+            print(f"Calculated dollar amount is <= 0 (${dollar_amount:.2f}). Skipping buys.")
+            logging.info(f"Calculated dollar amount is <= 0 (${dollar_amount:.2f}). Skipping buys.")
+            return
+        if FRACTIONAL_BUY_ORDERS and dollar_amount < 1.0:
+            print(f"Dollar amount (${dollar_amount:.2f}) too low for fractional orders. Skipping buys.")
+            logging.info(f"Dollar amount (${dollar_amount:.2f}) too low for fractional orders. Skipping buys.")
             return
         for sym in valid_symbols:
             print(f"\n{'='*60}")
@@ -1154,7 +1245,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             print(f"Analysis time: {current_time_str}")
             logging.info(f"Analysis time: {current_time_str}")
             current_price = rate_limited_get_quote(sym)
-            if current_price is None:
+            if current_price is None or current_price <= 0:
                 print(f"No valid price data for {sym}.")
                 logging.info(f"No valid price data for {sym}")
                 continue
@@ -1324,46 +1415,43 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
             short_term_trend = None
             with price_history_lock:
                 if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
-                    recent_prices = price_history[sym]['5min'][-2:]
-                    short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
-                    print(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
-                    logging.info(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
-            if detected_patterns and sym in price_history:
-                with price_history_lock:
-                    for interval, prices in price_history[sym].items():
-                        if len(prices) >= 2:
-                            print(f"{yf_symbol}: {interval} interval price history: {prices[-2:]}")
-                            logging.info(f"{yf_symbol}: {interval} interval price history: {prices[-2:]}")
-            if not ensure_no_open_orders(sym):
-                print(f"Cannot buy {sym}: Open orders exist.")
-                logging.info(f"Cannot buy {sym}: Open orders exist.")
-                continue
+                    short_term_trend = price_history[sym]['5min'][-1] > price_history[sym]['5min'][-2]
+                    trend_color = GREEN if short_term_trend else RED
+                    print(f"{yf_symbol}: Short-term trend (5min): {trend_color}{'Up' if short_term_trend else 'Down'}{RESET}")
+                    logging.info(f"{yf_symbol}: Short-term trend (5min): {'Up' if short_term_trend else 'Down'}")
             buy_qty = dollar_amount / current_price if FRACTIONAL_BUY_ORDERS else int(dollar_amount / current_price)
-            if buy_qty == 0:
-                print(f"Calculated quantity for {sym} is zero. Skipping buy.")
-                logging.info(f"Calculated quantity for {sym} is zero. Skipping buy.")
+            if buy_qty <= 0:
+                print(f"Calculated quantity for {sym} is <= 0 ({buy_qty:.4f}). Skipping buy.")
+                logging.info(f"Calculated quantity for {sym} is <= 0 ({buy_qty:.4f}). Skipping buy.")
                 continue
+            if FRACTIONAL_BUY_ORDERS and dollar_amount < 1.0:
+                print(f"Dollar amount for {sym} is too low (${dollar_amount:.2f}). Skipping buy.")
+                logging.info(f"Dollar amount for {sym} is too low (${dollar_amount:.2f}). Skipping buy.")
+                continue
+            if not is_in_uptrend(sym):
+                print(f"{sym} is not in an uptrend. Skipping.")
+                logging.info(f"{sym} is not in an uptrend. Skipping")
+                continue
+            if recent_avg_rsi > prior_avg_rsi:
+                print(f"{sym}: RSI increasing ({recent_avg_rsi:.2f} > {prior_avg_rsi:.2f}). Skipping.")
+                logging.info(f"{sym}: RSI increasing ({recent_avg_rsi:.2f} > {prior_avg_rsi:.2f}). Skipping")
+                continue
+            if price_increase:
+                print(f"{sym}: Price increasing ({current_price:.2f} > {previous_price * 1.005:.2f}). Skipping.")
+                logging.info(f"{sym}: Price increasing ({current_price:.2f} > {previous_price * 1.005:.2f}). Skipping")
+                continue
+            if not price_decline:
+                print(f"{sym}: Price did not decline enough ({current_price:.2f} > {price_decline_threshold:.2f}). Skipping.")
+                logging.info(f"{sym}: Price did not decline enough ({current_price:.2f} > {price_decline_threshold:.2f}). Skipping")
+                continue
+            buy_signal += 1
+            print(f"Buy signal detected for {sym} (Signal count: {buy_signal})")
+            logging.info(f"Buy signal detected for {sym} (Signal count: {buy_signal})")
             with buy_sell_lock:
-                print(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
-                logging.info(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
-                with open(csv_filename, mode='a', newline='') as csv_file:
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                    csv_writer.writerow({
-                        'Date': today_date_str,
-                        'Buy': buy_qty,
-                        'Sell': 0,
-                        'Quantity': buy_qty,
-                        'Symbol': sym,
-                        'Price Per Share': current_price
-                    })
-                    print(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
-                    logging.info(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
-                send_alert(
-                    f"Initiating buy of {buy_qty:.4f} shares of {sym} at ~${current_price:.2f}",
-                    subject=f"Trade Initiated: Buy {sym}"
-                )
-                print(f"Sent alert for intended buy of {sym}")
-                logging.info(f"Sent alert for intended buy of {sym}")
+                if not ensure_no_open_orders(sym):
+                    print(f"Cannot buy {sym}: Open orders exist.")
+                    logging.info(f"Cannot buy {sym}: Open orders exist.")
+                    continue
                 order_id = client_place_order(
                     symbol=sym,
                     side="BUY",
@@ -1371,15 +1459,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                     quantity=buy_qty if not FRACTIONAL_BUY_ORDERS else None
                 )
                 if order_id:
-                    buy_signal += 1
-                    print(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
-                    logging.info(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
-                    status_info = poll_order_status(order_id, timeout=600)
-                    print(f"Status info for order {order_id}: {status_info}")
-                    logging.info(f"Status info for order {order_id}: {status_info}")
+                    status_info = poll_order_status(order_id)
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
-                        avg_price = status_info["avg_price"] or current_price
+                        filled_price = status_info["avg_price"] or current_price
                         with db_lock:
                             session = SessionLocal()
                             try:
@@ -1387,32 +1470,25 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                     symbols=sym,
                                     action='buy',
                                     quantity=filled_qty,
-                                    price=avg_price,
+                                    price=filled_price,
                                     date=today_date_str
                                 )
                                 session.add(trade)
                                 position = session.query(Position).filter_by(symbols=sym).first()
                                 if position:
-                                    total_qty = position.quantity + filled_qty
-                                    total_cost = (position.quantity * position.avg_price + filled_qty * avg_price)
-                                    position.avg_price = total_cost / total_qty if total_qty > 0 else avg_price
-                                    position.quantity = total_qty
-                                    position.purchase_date = today_date_str
+                                    position.quantity += filled_qty
+                                    position.avg_price = ((position.avg_price * position.quantity) + (filled_price * filled_qty)) / (position.quantity + filled_qty)
                                 else:
                                     position = Position(
                                         symbols=sym,
                                         quantity=filled_qty,
-                                        avg_price=avg_price,
+                                        avg_price=filled_price,
                                         purchase_date=today_date_str
                                     )
                                     session.add(position)
-                                stop_order_id, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
-                                if stop_order_id:
-                                    position.stop_order_id = stop_order_id
-                                    position.stop_price = stop_price
                                 session.commit()
-                                print(f"Recorded buy for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
-                                logging.info(f"Recorded buy for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                                print(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
+                                logging.info(f"Buy order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
                                 with open(csv_filename, mode='a', newline='') as csv_file:
                                     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                     csv_writer.writerow({
@@ -1421,127 +1497,47 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                         'Sell': 0,
                                         'Quantity': filled_qty,
                                         'Symbol': sym,
-                                        'Price Per Share': avg_price
+                                        'Price Per Share': filled_price
                                     })
-                                    print(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
-                                    logging.info(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
                                 send_alert(
-                                    f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                    subject=f"Trade Executed: Buy {sym}"
+                                    f"Bought {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}",
+                                    subject=f"Buy Order Filled: {sym}"
                                 )
-                                print(f"Sent alert for filled buy of {sym}")
-                                logging.info(f"Sent alert for filled buy of {sym}")
+                                order_id, stop_price = place_stop_loss_order(sym, filled_qty, filled_price)
+                                if order_id:
+                                    position.stop_order_id = order_id
+                                    position.stop_price = stop_price
+                                    session.commit()
                                 symbols_to_remove.append(sym)
                             except Exception as e:
                                 session.rollback()
-                                logging.error(f"Database error for {sym} buy: {e}")
-                                print(f"Database error for {sym} buy: {e}")
+                                logging.error(f"Error updating database for {sym} buy: {e}")
+                                print(f"Error updating database for {sym} buy: {e}")
                             finally:
                                 session.close()
                     else:
-                        print(f"Buy order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
-                        logging.warning(f"Buy order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
+                        print(f"Buy order not filled for {sym}.")
+                        logging.info(f"Buy order not filled for {sym}")
+                        if status_info and status_info["status"] == "CANCELLED":
+                            print(f"Buy order for {sym} was cancelled.")
+                            logging.info(f"Buy order for {sym} was cancelled")
+                        elif status_info and status_info["status"] == "REJECTED":
+                            print(f"Buy order for {sym} was rejected.")
+                            logging.info(f"Buy order for {sym} was rejected")
+                        else:
+                            print(f"Buy order for {sym} timed out or failed.")
+                            logging.info(f"Buy order for {sym} timed out or failed")
                 else:
                     print(f"Failed to place buy order for {sym}.")
-                    logging.info(f"Failed to place buy order for {sym}.")
-            time.sleep(1)
+                    logging.info(f"Failed to place buy order for {sym}")
         for sym in symbols_to_remove:
             remove_symbols_from_trade_list(sym)
-        print(f"\nBuy signals generated: {buy_signal}")
-        logging.info(f"Buy signals generated: {buy_signal}")
-        if PRINT_SYMBOLS_TO_BUY:
-            print(f"\nSymbols to buy: {symbols_to_buy_list}")
-            logging.info(f"Symbols to buy: {symbols_to_buy_list}")
-        if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
-            print("\nCurrent symbols to sell from database:")
-            for sym, (avg_price, purchase_date) in symbols_to_sell_dict.items():
-                print(f"{sym} | Avg Price: ${avg_price:.2f} | Purchase Date: {purchase_date}")
-            logging.info(f"Current symbols to sell: {list(symbols_to_sell_dict.keys())}")
     except Exception as e:
         logging.error(f"Error in buy_stocks: {e}")
         print(f"Error in buy_stocks: {e}")
         traceback.print_exc()
     finally:
         task_running['buy_stocks'] = False
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
-    try:
-        if not account_id:
-            logging.error("No BROKERAGE accountId")
-            return None
-        if order_type == "MARKET":
-            order_response = place_market_order(
-                symbol=symbol,
-                side=side,
-                fractional=FRACTIONAL_BUY_ORDERS if amount is not None else False,
-                amount=amount,
-                quantity=quantity
-            )
-        else:  # STOP
-            url = f"{BASE_URL}/trading/{account_id}/order"
-            order_id = str(uuid4())
-            # Ensure quantity is an integer for STOP orders
-            if quantity is not None:
-                quantity = int(quantity)  # Force integer for stop orders
-            payload = {
-                "orderId": order_id,
-                "instrument": {"symbol": symbol, "type": "EQUITY"},
-                "orderSide": side.upper(),
-                "orderType": "STOP",
-                "stopPrice": stop_price,
-                "quantity": str(quantity),  # Always integer for stop orders
-                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
-            }
-            response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
-            if response.status_code >= 400:
-                print(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
-                logging.error(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
-                return {"error": f"HTTP {response.status_code}: {response.text}"}
-            response.raise_for_status()
-            order_response = response.json()
-            logging.info(f"Stop sell order placed successfully for {symbol}: {order_response}")
-        if order_response.get('error'):
-            logging.error(f"Order placement error for {symbol}: {order_response['error']}")
-            return None
-        order_id = order_response.get('orderId')
-        if amount is not None:
-            logging.info(f"Order placed: {side} ${amount:.2f} of {symbol}, Order ID: {order_id}")
-        else:
-            logging.info(f"Order placed: {side} {quantity} shares of {symbol}, Order ID: {order_id}")
-        return order_id
-    except Exception as e:
-        logging.error(f"Order placement error for {symbol}: {e}")
-        return None
-
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
-    try:
-        atr = get_average_true_range(symbol)
-        if atr is None:
-            logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
-            print(f"No ATR for {symbol}. Skipping stop-loss.")
-            return None, None
-        stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
-        stop_color = GREEN if stop_price >= 0 else RED
-        # Always use integer quantity for stop orders
-        sell_qty = int(qty)  # Force integer for stop orders
-        if sell_qty == 0:
-            logging.error(f"Skipped stop-loss for {symbol}: Integer quantity is zero.")
-            print(f"Skipped stop-loss for {symbol}: Integer quantity is zero.")
-            return None, None
-        order_id = client_place_order(symbol, "SELL", quantity=sell_qty, order_type="STOP_MARKET", stop_price=stop_price)
-        if order_id:
-            print(f"Placed stop-loss order for {sell_qty} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
-            logging.info(f"Placed stop-loss for {sell_qty} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
-            return order_id, stop_price
-        return None, None
-    except Exception as e:
-        logging.error(f"Error placing stop-loss for {symbol}: {e}")
-        print(f"Error placing stop-loss for {symbol}: {e}")
-        return None, None
 
 def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     if task_running['sell_stocks']:
@@ -1552,158 +1548,101 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     try:
         print("\nStarting sell_stocks function...")
         logging.info("Starting sell_stocks function")
-        today_date = datetime.today().date()
-        today_date_str = today_date.strftime("%Y-%m-%d")
-        current_datetime = datetime.now(eastern)
-        current_time_str = current_datetime.strftime("Eastern Time | %I:%M:%S %p | %m-%d-%Y |")
-        print(f"Analysis time: {current_time_str}")
-        logging.info(f"Analysis time: {current_time_str}")
         positions = client_list_positions()
         if not positions:
             print("No positions to sell.")
             logging.info("No positions to sell")
             return
+        today_date = datetime.today().date()
+        today_date_str = today_date.strftime("%Y-%m-%d")
         for pos in positions:
             sym = pos['symbol']
             qty = pos['qty']
             avg_price = pos['avg_entry_price']
-            if qty <= 0:
-                print(f"No quantity to sell for {sym}. Skipping.")
-                logging.info(f"No quantity to sell for {sym}. Skipping")
+            api_position = next((p for p in positions if p['symbol'] == sym), None)
+            if not api_position or api_position['qty'] < qty:
+                print(f"Cannot sell {qty:.4f} shares of {sym}: Available qty is {api_position['qty'] if api_position else 0:.4f}")
+                logging.info(f"Cannot sell {qty:.4f} shares of {sym}: Available qty is {api_position['qty'] if api_position else 0:.4f}")
                 continue
-            print(f"\n{'='*60}")
-            print(f"Processing sell for {sym}...")
-            print(f"{'='*60}")
-            logging.info(f"Processing sell for {sym}")
             current_price = rate_limited_get_quote(sym)
-            if current_price is None:
+            if current_price is None or current_price <= 0:
                 print(f"No valid price for {sym}. Skipping.")
                 logging.info(f"No valid price for {sym}. Skipping")
                 continue
-            current_color = GREEN if current_price >= 0 else RED
-            print(f"Current price for {sym}: {current_color}${current_price:.2f}{RESET}")
-            logging.info(f"Current price for {sym}: ${current_price:.2f}")
-            yf_symbol = sym.replace('.', '-')
-            df = rate_limited_yf_history(yf_symbol)
+            sell_qty = round(qty, 4) if FRACTIONAL_BUY_ORDERS else int(qty)
+            if sell_qty <= 0:
+                print(f"Calculated sell quantity for {sym} is <= 0 ({sell_qty:.4f}). Skipping.")
+                logging.info(f"Calculated sell quantity for {sym} is <= 0 ({sell_qty:.4f}). Skipping")
+                continue
+            if sym not in symbols_to_sell_dict:
+                print(f"{sym} not in sell list. Skipping.")
+                logging.info(f"{sym} not in sell list. Skipping")
+                continue
+            avg_price, purchase_date = symbols_to_sell_dict[sym]
+            df = rate_limited_yf_history(sym)
             if df.empty or len(df) < 14:
                 print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
                 logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping")
                 continue
             df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
             if len(df) < 14:
-                print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
-                logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
+                print(f"After cleaning, insufficient data for {sym} (rows: {len(df)}). Skipping.")
+                logging.info(f"After cleaning, insufficient data for {sym} (rows: {len(df)}). Skipping")
                 continue
-            sell_score = 0
             close = df['Close'].values
             try:
                 rsi = talib.RSI(close, timeperiod=14)
                 latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
                 latest_rsi = round(latest_rsi, 2)
-                if latest_rsi > 70:
-                    sell_score += 1
-                    print(f"{yf_symbol}: RSI > 70 ({latest_rsi:.2f}): +1 sell score")
-                    logging.info(f"{yf_symbol}: RSI > 70 ({latest_rsi:.2f}): +1 sell score")
-                print(f"Latest RSI: {latest_rsi:.2f}")
-                logging.info(f"Latest RSI: {latest_rsi:.2f}")
+                print(f"Latest RSI for {sym}: {latest_rsi}")
+                logging.info(f"Latest RSI for {sym}: {latest_rsi}")
             except Exception as e:
-                print(f"Error calculating RSI for {yf_symbol}: {e}")
-                logging.error(f"Error calculating RSI for {yf_symbol}: {e}")
-            if close[-1] >= close[-2] * 1.003:
-                sell_score += 1
-                print(f"{yf_symbol}: Price increase >= 0.3% from previous close: +1 sell score")
-                logging.info(f"{yf_symbol}: Price increase >= 0.3% from previous close: +1 sell score")
-            recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
-            prior_avg_volume = df['Volume'].iloc[-10:-5].mean() if len(df) >= 10 else recent_avg_volume
-            volume_increase = recent_avg_volume > prior_avg_volume * 1.05 if len(df) >= 10 else False
-            if volume_increase:
-                sell_score += 1
-                print(f"{yf_symbol}: Volume increase detected: +1 sell score")
-                logging.info(f"{yf_symbol}: Volume increase detected: +1 sell score")
-            print(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume increase = {volume_increase}")
-            logging.info(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume increase = {volume_increase}")
-            profit_percentage = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
-            profit_color = GREEN if profit_percentage >= 0 else RED
-            print(f"{yf_symbol}: Profit = {profit_color}{profit_percentage:.2f}%{RESET}")
-            logging.info(f"{yf_symbol}: Profit = {profit_percentage:.2f}%")
-            if profit_percentage >= 3.0:
-                sell_score += 1
-                print(f"{yf_symbol}: Profit >= 3.0% ({profit_percentage:.2f}%): +1 sell score")
-                logging.info(f"{yf_symbol}: Profit >= 3.0% ({profit_percentage:.2f}%): +1 sell score")
-            elif profit_percentage <= -2.0:
-                sell_score += 1
-                print(f"{yf_symbol}: Loss <= -2.0% ({profit_percentage:.2f}%): +1 sell score")
-                logging.info(f"{yf_symbol}: Loss <= -2.0% ({profit_percentage:.2f}%): +1 sell score")
-            if sell_score < 3:
-                print(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell.")
-                logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
-                continue
-            # Determine sell quantity based on order type
-            market_sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
-            if market_sell_qty <= 0:
-                print(f"Calculated market sell quantity for {sym} is zero. Skipping.")
-                logging.info(f"Calculated market sell quantity for {sym} is zero. Skipping")
+                print(f"Error calculating RSI for {sym}: {e}")
+                logging.error(f"Error calculating RSI for {sym}: {e}")
+                latest_rsi = 50.00
+            purchase_date_dt = datetime.strptime(purchase_date, "%Y-%m-%d").date()
+            days_held = (today_date - purchase_date_dt).days
+            price_change = ((current_price - avg_price) / avg_price * 100) if avg_price else 0
+            change_color = GREEN if price_change >= 0 else RED
+            print(f"{sym}: Held {days_held} days, Price change: {change_color}{price_change:.2f}%{RESET}")
+            logging.info(f"{sym}: Held {days_held} days, Price change: {price_change:.2f}%")
+            sell_signal = False
+            if days_held >= 30:
+                print(f"{sym}: Held >= 30 days. Sell signal.")
+                logging.info(f"{sym}: Held >= 30 days. Sell signal")
+                sell_signal = True
+            elif price_change >= 10:
+                print(f"{sym}: Price up >= 10% ({price_change:.2f}%). Sell signal.")
+                logging.info(f"{sym}: Price up >= 10% ({price_change:.2f}%). Sell signal")
+                sell_signal = True
+            elif price_change <= -5:
+                print(f"{sym}: Price down >= 5% ({price_change:.2f}%). Sell signal.")
+                logging.info(f"{sym}: Price down >= 5% ({price_change:.2f}%). Sell signal")
+                sell_signal = True
+            elif latest_rsi >= 70:
+                print(f"{sym}: RSI >= 70 ({latest_rsi}). Sell signal.")
+                logging.info(f"{sym}: RSI >= 70 ({latest_rsi}). Sell signal")
+                sell_signal = True
+            if not sell_signal:
+                print(f"No sell signal for {sym}. Skipping.")
+                logging.info(f"No sell signal for {sym}. Skipping")
                 continue
             with buy_sell_lock:
                 if not ensure_no_open_orders(sym):
                     print(f"Cannot sell {sym}: Open orders exist.")
                     logging.info(f"Cannot sell {sym}: Open orders exist.")
                     continue
-                print(f"Preparing to sell {market_sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f} via market order")
-                logging.info(f"Preparing to sell {market_sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f} via market order")
-                with open(csv_filename, mode='a', newline='') as csv_file:
-                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-                    csv_writer.writerow({
-                        'Date': today_date_str,
-                        'Buy': 0,
-                        'Sell': market_sell_qty,
-                        'Quantity': market_sell_qty,
-                        'Symbol': sym,
-                        'Price Per Share': current_price
-                    })
-                    print(f"Logged intended sell for {market_sell_qty:.4f} shares of {sym} to CSV")
-                    logging.info(f"Logged intended sell for {market_sell_qty:.4f} shares of {sym} to CSV")
-                send_alert(
-                    f"Initiating sell of {market_sell_qty:.4f} shares of {sym} at ~${current_price:.2f}",
-                    subject=f"Trade Initiated: Sell {sym}"
-                )
-                print(f"Sent alert for intended sell of {sym}")
-                logging.info(f"Sent alert for intended sell of {sym}")
                 order_id = client_place_order(
                     symbol=sym,
                     side="SELL",
                     amount=None,
-                    quantity=market_sell_qty,
-                    order_type="MARKET"
+                    quantity=sell_qty
                 )
                 if order_id:
-                    print(f"Sell order placed for {market_sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
-                    logging.info(f"Sell order placed for {market_sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
-                    status_info = poll_order_status(order_id, timeout=600)
-                    print(f"Status info for order {order_id}: {status_info}")
-                    logging.info(f"Status info for order {order_id}: {status_info}")
+                    status_info = poll_order_status(order_id)
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
-                        avg_price = status_info["avg_price"] or current_price
-                        # If fractional shares remain after a stop order, sell them via market order
-                        remaining_qty = qty - filled_qty
-                        if remaining_qty > 0 and FRACTIONAL_BUY_ORDERS:
-                            print(f"Remaining fractional quantity {remaining_qty:.4f} for {sym}. Placing market order to sell.")
-                            logging.info(f"Remaining fractional quantity {remaining_qty:.4f} for {sym}. Placing market order to sell.")
-                            market_order_id = client_place_order(
-                                symbol=sym,
-                                side="SELL",
-                                amount=None,
-                                quantity=remaining_qty,
-                                order_type="MARKET"
-                            )
-                            if market_order_id:
-                                market_status_info = poll_order_status(market_order_id, timeout=600)
-                                if market_status_info and market_status_info["status"] == "FILLED":
-                                    filled_qty += market_status_info["filled_qty"]
-                                    avg_price = (avg_price * status_info["filled_qty"] + (market_status_info["avg_price"] or current_price) * market_status_info["filled_qty"]) / filled_qty if filled_qty > 0 else avg_price
-                                    print(f"Remaining fractional shares sold for {sym}. Total filled qty: {filled_qty:.4f}")
-                                    logging.info(f"Remaining fractional shares sold for {sym}. Total filled qty: {filled_qty:.4f}")
+                        filled_price = status_info["avg_price"] or current_price
                         with db_lock:
                             session = SessionLocal()
                             try:
@@ -1711,7 +1650,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                     symbols=sym,
                                     action='sell',
                                     quantity=filled_qty,
-                                    price=avg_price,
+                                    price=filled_price,
                                     date=today_date_str
                                 )
                                 session.add(trade)
@@ -1722,12 +1661,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                         if position.stop_order_id:
                                             client_cancel_order({'orderId': position.stop_order_id, 'instrument': {'symbol': sym}})
                                         session.delete(position)
-                                    else:
-                                        total_cost = position.quantity * position.avg_price
-                                        position.avg_price = total_cost / position.quantity if position.quantity > 0 else position.avg_price
-                                session.commit()
-                                print(f"Recorded sell for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
-                                logging.info(f"Recorded sell for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+                                    session.commit()
                                 with open(csv_filename, mode='a', newline='') as csv_file:
                                     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                     csv_writer.writerow({
@@ -1736,29 +1670,35 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                         'Sell': filled_qty,
                                         'Quantity': filled_qty,
                                         'Symbol': sym,
-                                        'Price Per Share': avg_price
+                                        'Price Per Share': filled_price
                                     })
-                                    print(f"Logged filled sell for {filled_qty:.4f} shares of {sym} to CSV")
-                                    logging.info(f"Logged filled sell for {filled_qty:.4f} shares of {sym} to CSV")
+                                print(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
+                                logging.info(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
                                 send_alert(
-                                    f"Sold {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                                    subject=f"Trade Executed: Sell {sym}"
+                                    f"Sold {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}",
+                                    subject=f"Sell Order Filled: {sym}"
                                 )
-                                print(f"Sent alert for filled sell of {sym}")
-                                logging.info(f"Sent alert for filled sell of {sym}")
                             except Exception as e:
                                 session.rollback()
-                                logging.error(f"Database error for {sym} sell: {e}")
-                                print(f"Database error for {sym} sell: {e}")
+                                logging.error(f"Error updating database for {sym} sell: {e}")
+                                print(f"Error updating database for {sym} sell: {e}")
                             finally:
                                 session.close()
                     else:
-                        print(f"Sell order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
-                        logging.warning(f"Sell order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
+                        print(f"Sell order not filled for {sym}.")
+                        logging.info(f"Sell order not filled for {sym}")
+                        if status_info and status_info["status"] == "CANCELLED":
+                            print(f"Sell order for {sym} was cancelled.")
+                            logging.info(f"Sell order for {sym} was cancelled")
+                        elif status_info and status_info["status"] == "REJECTED":
+                            print(f"Sell order for {sym} was rejected.")
+                            logging.info(f"Sell order for {sym} was rejected")
+                        else:
+                            print(f"Sell order for {sym} timed out or failed.")
+                            logging.info(f"Sell order for {sym} timed out or failed")
                 else:
                     print(f"Failed to place sell order for {sym}.")
-                    logging.info(f"Failed to place sell order for {sym}.")
-            time.sleep(1)
+                    logging.info(f"Failed to place sell order for {sym}")
     except Exception as e:
         logging.error(f"Error in sell_stocks: {e}")
         print(f"Error in sell_stocks: {e}")
@@ -1766,48 +1706,57 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     finally:
         task_running['sell_stocks'] = False
 
+def run_scheduled_tasks():
+    print("Running scheduled tasks...")
+    logging.info("Running scheduled tasks")
+    try:
+        sync_db_with_api()
+        symbols_to_buy_list = get_symbols_to_buy()
+        symbols_to_sell_dict = load_positions_from_database()
+        if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
+            print("\nSymbols to buy:", symbols_to_buy_list)
+            print("Symbols to sell:", list(symbols_to_sell_dict.keys()))
+            logging.info(f"Symbols to buy: {symbols_to_buy_list}")
+            logging.info(f"Symbols to sell: {list(symbols_to_sell_dict.keys())}")
+        buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock)
+        sell_stocks(symbols_to_sell_dict, buy_sell_lock)
+        check_price_moves()
+        monitor_stop_losses()
+        check_stop_order_status()
+        print_database_tables()
+    except Exception as e:
+        logging.error(f"Error in scheduled tasks: {e}")
+        print(f"Error in scheduled tasks: {e}")
+        traceback.print_exc()
+
 def main():
+    print("Starting main function...")
+    logging.info("Starting main function")
     initialize_csv()
-    while True:
-        try:
-            stop_if_stock_market_is_closed()
-            if not refresh_token_if_needed():
-                print("Failed to refresh token. Retrying in 60 seconds...")
-                logging.error("Failed to refresh token. Retrying in 60 seconds.")
-                time.sleep(60)
-                continue
-            sync_db_with_api()
-            symbols_to_buy_list = get_symbols_to_buy()
-            symbols_to_sell_dict = load_positions_from_database()
-            print_database_tables()
-            buy_thread = threading.Thread(target=buy_stocks, args=(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock))
-            sell_thread = threading.Thread(target=sell_stocks, args=(symbols_to_sell_dict, buy_sell_lock))
-            monitor_thread = threading.Thread(target=monitor_stop_losses)
-            price_thread = threading.Thread(target=check_price_moves)
-            stop_order_thread = threading.Thread(target=check_stop_order_status)
-            buy_thread.start()
-            sell_thread.start()
-            monitor_thread.start()
-            price_thread.start()
-            stop_order_thread.start()
-            buy_thread.join()
-            sell_thread.join()
-            monitor_thread.join()
-            price_thread.join()
-            stop_order_thread.join()
-            print("\nAll threads completed. Sleeping for 45 seconds before next cycle...")
-            logging.info("All threads completed. Sleeping for 45 seconds before next cycle.")
-            time.sleep(45)
-        except KeyboardInterrupt:
-            print("\nReceived KeyboardInterrupt. Shutting down gracefully...")
-            logging.info("Received KeyboardInterrupt. Shutting down gracefully.")
-            break
-        except Exception as e:
-            logging.error(f"Main loop error: {e}")
-            print(f"Main loop error: {e}")
-            traceback.print_exc()
-            time.sleep(60)
+    if not YOUR_SECRET_KEY or not CALLMEBOT_API_KEY or not CALLMEBOT_PHONE:
+        logging.error("Missing required environment variables: YOUR_SECRET_KEY, CALLMEBOT_API_KEY, or CALLMEBOT_PHONE")
+        print("Missing required environment variables: YOUR_SECRET_KEY, CALLMEBOT_API_KEY, or CALLMEBOT_PHONE")
+        return
+    if not fetch_token_and_account():
+        logging.error("Failed to initialize token and account. Exiting.")
+        print("Failed to initialize token and account. Exiting.")
+        return
+    stop_if_stock_market_is_closed()
+    sync_db_with_api()
+    schedule.every(5).minutes.do(run_scheduled_tasks)
+    schedule.every(30).minutes.do(refresh_token_if_needed)
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Program interrupted by user. Exiting...")
+        logging.info("Program interrupted by user. Exiting")
+    except Exception as e:
+        logging.error(f"Unexpected error in main loop: {e}")
+        print(f"Unexpected error in main loop: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
-    
+
