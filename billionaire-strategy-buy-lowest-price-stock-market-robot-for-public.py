@@ -242,54 +242,6 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
         traceback.print_exc()
         return {"error": str(e)}
 
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
-    try:
-        if not account_id:
-            logging.error("No BROKERAGE accountId")
-            return None
-        if order_type == "MARKET":
-            order_response = place_market_order(
-                symbol=symbol,
-                side=side,
-                fractional=FRACTIONAL_BUY_ORDERS if amount is not None else False,
-                amount=amount,
-                quantity=quantity
-            )
-        else:  # STOP
-            url = f"{BASE_URL}/trading/{account_id}/order"
-            order_id = str(uuid4())
-            payload = {
-                "orderId": order_id,
-                "instrument": {"symbol": symbol, "type": "EQUITY"},
-                "orderSide": side.upper(),
-                "orderType": "STOP",
-                "stopPrice": stop_price,
-                "quantity": f"{quantity:.4f}" if quantity % 1 != 0 else str(int(quantity)),
-                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
-            }
-            response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
-            if response.status_code >= 400:
-                print(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
-                logging.error(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
-                return {"error": f"HTTP {response.status_code}: {response.text}"}
-            response.raise_for_status()
-            order_response = response.json()
-            logging.info(f"Stop sell order placed successfully for {symbol}: {order_response}")
-        if order_response.get('error'):
-            logging.error(f"Order placement error for {symbol}: {order_response['error']}")
-            return None
-        order_id = order_response.get('orderId')
-        if amount is not None:
-            logging.info(f"Order placed: {side} ${amount:.2f} of {symbol}, Order ID: {order_id}")
-        else:
-            logging.info(f"Order placed: {side} {quantity} shares of {symbol}, Order ID: {order_id}")
-        return order_id
-    except Exception as e:
-        logging.error(f"Order placement error for {symbol}: {e}")
-        return None
-
 def get_expiration():
     """Return expirationTime string for GTD orders (full-share), skip weekends"""
     exp = datetime.now(timezone.utc) + timedelta(days=30)
@@ -903,33 +855,6 @@ def remove_symbols_from_trade_list(symbol):
         logging.error(f"Error removing {symbol} from trade list: {e}")
         print(f"Error removing {symbol} from trade list: {e}")
 
-@sleep_and_retry
-@limits(calls=CALLS, period=PERIOD)
-def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
-    try:
-        atr = get_average_true_range(symbol)
-        if atr is None:
-            logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
-            print(f"No ATR for {symbol}. Skipping stop-loss.")
-            return None, None
-        stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
-        stop_color = GREEN if stop_price >= 0 else RED
-        sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
-        if sell_qty == 0:
-            logging.error(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
-            print(f"Skipped stop-loss for {symbol}: Quantity {sell_qty} is zero.")
-            return None, None
-        order_id = client_place_order(symbol, "SELL", quantity=sell_qty, order_type="STOP_MARKET", stop_price=stop_price)
-        if order_id:
-            print(f"Placed stop-loss order for {sell_qty:.4f} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
-            logging.info(f"Placed stop-loss for {sell_qty:.4f} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
-            return order_id, stop_price
-        return None, None
-    except Exception as e:
-        logging.error(f"Error placing stop-loss for {symbol}: {e}")
-        print(f"Error placing stop-loss for {symbol}: {e}")
-        return None, None
-
 def monitor_stop_losses():
     if task_running['monitor_stop_losses']:
         print("monitor_stop_losses already running. Skipping.")
@@ -1538,7 +1463,86 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         traceback.print_exc()
     finally:
         task_running['buy_stocks'] = False
-        
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def client_place_order(symbol, side, amount=None, quantity=None, order_type="MARKET", limit_price=None, stop_price=None):
+    try:
+        if not account_id:
+            logging.error("No BROKERAGE accountId")
+            return None
+        if order_type == "MARKET":
+            order_response = place_market_order(
+                symbol=symbol,
+                side=side,
+                fractional=FRACTIONAL_BUY_ORDERS if amount is not None else False,
+                amount=amount,
+                quantity=quantity
+            )
+        else:  # STOP
+            url = f"{BASE_URL}/trading/{account_id}/order"
+            order_id = str(uuid4())
+            # Ensure quantity is an integer for STOP orders
+            if quantity is not None:
+                quantity = int(quantity)  # Force integer for stop orders
+            payload = {
+                "orderId": order_id,
+                "instrument": {"symbol": symbol, "type": "EQUITY"},
+                "orderSide": side.upper(),
+                "orderType": "STOP",
+                "stopPrice": stop_price,
+                "quantity": str(quantity),  # Always integer for stop orders
+                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
+            }
+            response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
+            if response.status_code >= 400:
+                print(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
+                logging.error(f"HTTP Error Response for {symbol}: {response.status_code} {response.text}")
+                return {"error": f"HTTP {response.status_code}: {response.text}"}
+            response.raise_for_status()
+            order_response = response.json()
+            logging.info(f"Stop sell order placed successfully for {symbol}: {order_response}")
+        if order_response.get('error'):
+            logging.error(f"Order placement error for {symbol}: {order_response['error']}")
+            return None
+        order_id = order_response.get('orderId')
+        if amount is not None:
+            logging.info(f"Order placed: {side} ${amount:.2f} of {symbol}, Order ID: {order_id}")
+        else:
+            logging.info(f"Order placed: {side} {quantity} shares of {symbol}, Order ID: {order_id}")
+        return order_id
+    except Exception as e:
+        logging.error(f"Order placement error for {symbol}: {e}")
+        return None
+
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
+def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
+    try:
+        atr = get_average_true_range(symbol)
+        if atr is None:
+            logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
+            print(f"No ATR for {symbol}. Skipping stop-loss.")
+            return None, None
+        stop_price = round(avg_price * (1 - atr_multiplier * atr / avg_price), 2)
+        stop_color = GREEN if stop_price >= 0 else RED
+        # Always use integer quantity for stop orders
+        sell_qty = int(qty)  # Force integer for stop orders
+        if sell_qty == 0:
+            logging.error(f"Skipped stop-loss for {symbol}: Integer quantity is zero.")
+            print(f"Skipped stop-loss for {symbol}: Integer quantity is zero.")
+            return None, None
+        order_id = client_place_order(symbol, "SELL", quantity=sell_qty, order_type="STOP_MARKET", stop_price=stop_price)
+        if order_id:
+            print(f"Placed stop-loss order for {sell_qty} shares of {symbol} at {stop_color}${stop_price:.2f}{RESET}, Order ID: {order_id}")
+            logging.info(f"Placed stop-loss for {sell_qty} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
+            return order_id, stop_price
+        return None, None
+    except Exception as e:
+        logging.error(f"Error placing stop-loss for {symbol}: {e}")
+        print(f"Error placing stop-loss for {symbol}: {e}")
+        return None, None
+
 def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     if task_running['sell_stocks']:
         print("sell_stocks already running. Skipping.")
@@ -1634,37 +1638,33 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                 print(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell.")
                 logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
                 continue
-            sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
-            # Check if sell_qty exceeds owned quantity
-            if sell_qty > qty:
-                print(f"Error: Attempted to sell {sell_qty:.4f} shares of {sym}, but only own {qty:.4f}. Skipping sell.")
-                logging.error(f"Attempted to sell {sell_qty:.4f} shares of {sym}, but only own {qty:.4f}. Skipping sell.")
-                continue
-            if sell_qty <= 0:
-                print(f"Calculated sell quantity for {sym} is zero. Skipping.")
-                logging.info(f"Calculated sell quantity for {sym} is zero. Skipping")
+            # Determine sell quantity based on order type
+            market_sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+            if market_sell_qty <= 0:
+                print(f"Calculated market sell quantity for {sym} is zero. Skipping.")
+                logging.info(f"Calculated market sell quantity for {sym} is zero. Skipping")
                 continue
             with buy_sell_lock:
                 if not ensure_no_open_orders(sym):
                     print(f"Cannot sell {sym}: Open orders exist.")
                     logging.info(f"Cannot sell {sym}: Open orders exist.")
                     continue
-                print(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
-                logging.info(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+                print(f"Preparing to sell {market_sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f} via market order")
+                logging.info(f"Preparing to sell {market_sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f} via market order")
                 with open(csv_filename, mode='a', newline='') as csv_file:
                     csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                     csv_writer.writerow({
                         'Date': today_date_str,
                         'Buy': 0,
-                        'Sell': sell_qty,
-                        'Quantity': sell_qty,
+                        'Sell': market_sell_qty,
+                        'Quantity': market_sell_qty,
                         'Symbol': sym,
                         'Price Per Share': current_price
                     })
-                    print(f"Logged intended sell for {sell_qty:.4f} shares of {sym} to CSV")
-                    logging.info(f"Logged intended sell for {sell_qty:.4f} shares of {sym} to CSV")
+                    print(f"Logged intended sell for {market_sell_qty:.4f} shares of {sym} to CSV")
+                    logging.info(f"Logged intended sell for {market_sell_qty:.4f} shares of {sym} to CSV")
                 send_alert(
-                    f"Initiating sell of {sell_qty:.4f} shares of {sym} at ~${current_price:.2f}",
+                    f"Initiating sell of {market_sell_qty:.4f} shares of {sym} at ~${current_price:.2f}",
                     subject=f"Trade Initiated: Sell {sym}"
                 )
                 print(f"Sent alert for intended sell of {sym}")
@@ -1673,17 +1673,37 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                     symbol=sym,
                     side="SELL",
                     amount=None,
-                    quantity=sell_qty
+                    quantity=market_sell_qty,
+                    order_type="MARKET"
                 )
                 if order_id:
-                    print(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
-                    logging.info(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
+                    print(f"Sell order placed for {market_sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
+                    logging.info(f"Sell order placed for {market_sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
                     status_info = poll_order_status(order_id, timeout=600)
                     print(f"Status info for order {order_id}: {status_info}")
                     logging.info(f"Status info for order {order_id}: {status_info}")
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
                         avg_price = status_info["avg_price"] or current_price
+                        # If fractional shares remain after a stop order, sell them via market order
+                        remaining_qty = qty - filled_qty
+                        if remaining_qty > 0 and FRACTIONAL_BUY_ORDERS:
+                            print(f"Remaining fractional quantity {remaining_qty:.4f} for {sym}. Placing market order to sell.")
+                            logging.info(f"Remaining fractional quantity {remaining_qty:.4f} for {sym}. Placing market order to sell.")
+                            market_order_id = client_place_order(
+                                symbol=sym,
+                                side="SELL",
+                                amount=None,
+                                quantity=remaining_qty,
+                                order_type="MARKET"
+                            )
+                            if market_order_id:
+                                market_status_info = poll_order_status(market_order_id, timeout=600)
+                                if market_status_info and market_status_info["status"] == "FILLED":
+                                    filled_qty += market_status_info["filled_qty"]
+                                    avg_price = (avg_price * status_info["filled_qty"] + (market_status_info["avg_price"] or current_price) * market_status_info["filled_qty"]) / filled_qty if filled_qty > 0 else avg_price
+                                    print(f"Remaining fractional shares sold for {sym}. Total filled qty: {filled_qty:.4f}")
+                                    logging.info(f"Remaining fractional shares sold for {sym}. Total filled qty: {filled_qty:.4f}")
                         with db_lock:
                             session = SessionLocal()
                             try:
@@ -1745,7 +1765,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
         traceback.print_exc()
     finally:
         task_running['sell_stocks'] = False
-        
+
 def main():
     initialize_csv()
     while True:
