@@ -1635,6 +1635,11 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                 logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
                 continue
             sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
+            # Check if sell_qty exceeds owned quantity
+            if sell_qty > qty:
+                print(f"Error: Attempted to sell {sell_qty:.4f} shares of {sym}, but only own {qty:.4f}. Skipping sell.")
+                logging.error(f"Attempted to sell {sell_qty:.4f} shares of {sym}, but only own {qty:.4f}. Skipping sell.")
+                continue
             if sell_qty <= 0:
                 print(f"Calculated sell quantity for {sym} is zero. Skipping.")
                 logging.info(f"Calculated sell quantity for {sym} is zero. Skipping")
