@@ -209,14 +209,13 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
     url = f"{BASE_URL}/trading/{account_id}/order"
     order_id = str(uuid4())
     is_fractional = fractional or (amount is not None) or (quantity is not None and quantity % 1 != 0)
-    expiration = {"timeInForce": "DAY"} if is_fractional else {"timeInForce": "GTD", "expirationTime": get_expiration()}
+    expiration = {"timeInForce": "DAY"}  # All market orders are DAY
     payload = {
         "orderId": order_id,
         "instrument": {"symbol": symbol, "type": "EQUITY"},
         "orderSide": side.upper(),
         "orderType": "MARKET",
-        "expiration": expiration,
-        "openCloseIndicator": "OPEN"
+        "expiration": expiration
     }
     if amount is not None:
         payload["amount"] = f"{amount:.2f}"
@@ -258,18 +257,17 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 amount=amount,
                 quantity=quantity
             )
-        else:  # STOP_MARKET
+        else:  # STOP
             url = f"{BASE_URL}/trading/{account_id}/order"
             order_id = str(uuid4())
             payload = {
                 "orderId": order_id,
                 "instrument": {"symbol": symbol, "type": "EQUITY"},
                 "orderSide": side.upper(),
-                "orderType": "STOP_MARKET",
+                "orderType": "STOP",
                 "stopPrice": stop_price,
                 "quantity": f"{quantity:.4f}" if quantity % 1 != 0 else str(int(quantity)),
-                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()},
-                "openCloseIndicator": "OPEN"
+                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
             }
             response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
             if response.status_code >= 400:
@@ -278,7 +276,7 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 return {"error": f"HTTP {response.status_code}: {response.text}"}
             response.raise_for_status()
             order_response = response.json()
-            logging.info(f"Stop-market order placed successfully for {symbol}: {order_response}")
+            logging.info(f"Stop sell order placed successfully for {symbol}: {order_response}")
         if order_response.get('error'):
             logging.error(f"Order placement error for {symbol}: {order_response['error']}")
             return None
@@ -291,6 +289,15 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
     except Exception as e:
         logging.error(f"Order placement error for {symbol}: {e}")
         return None
+
+def get_expiration():
+    """Return expirationTime string for GTD orders (full-share), skip weekends"""
+    exp = datetime.now(timezone.utc) + timedelta(days=30)
+    if exp.weekday() == 5:
+        exp += timedelta(days=2)
+    elif exp.weekday() == 6:
+        exp += timedelta(days=1)
+    return exp.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
@@ -517,15 +524,6 @@ def client_list_positions():
     except Exception as e:
         logging.error(f"Positions fetch error: {e}")
         return []
-
-def get_expiration():
-    """Return expirationTime string for GTD orders (full-share), skip weekends"""
-    exp = datetime.now(timezone.utc) + timedelta(days=30)
-    if exp.weekday() == 5:
-        exp += timedelta(days=2)
-    elif exp.weekday() == 6:
-        exp += timedelta(days=1)
-    return exp.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
 def sync_db_with_api():
     if task_running['sync_db_with_api']:
