@@ -824,18 +824,51 @@ def print_database_tables():
             session.close()
 
 def stop_if_stock_market_is_closed():
-    now = datetime.now(eastern)
-    nyse_schedule = nyse_cal.schedule(start_date=now.date(), end_date=now.date())
-    if nyse_schedule.empty:
-        print("Stock market is closed today. Exiting.")
-        logging.info("Stock market is closed today. Exiting.")
-        sys.exit(0)
-    market_open = nyse_schedule.iloc[0]['market_open'].astimezone(eastern)
-    market_close = nyse_schedule.iloc[0]['market_close'].astimezone(eastern)
-    if not (market_open.time() <= now.time() <= market_close.time()):
-        print(f"Stock market is closed at {now}. Exiting.")
-        logging.info(f"Stock market is closed at {now}. Exiting.")
-        sys.exit(0)
+    nyse = mcal.get_calendar('NYSE')
+    while True:
+        eastern = pytz.timezone('US/Eastern')
+        current_datetime = datetime.now(eastern)
+        current_time_str = current_datetime.strftime("%A, %B %d, %Y, %I:%M:%S %p")
+        schedule = nyse.schedule(start_date=current_datetime.date(), end_date=current_datetime.date())
+        if not schedule.empty:
+            market_open = schedule.iloc[0]['market_open'].astimezone(eastern)
+            market_close = schedule.iloc[0]['market_close'].astimezone(eastern)
+            if market_open <= current_datetime <= market_close:
+                print("Market is open. Proceeding with trading operations.")
+                logging.info(f"{current_time_str}: Market is open. Proceeding with trading operations.")
+                break
+            else:
+                print("\n")
+                print('''
+                *********************************************************************************
+                ************ Billionaire Buying Strategy Version ********************************
+                *********************************************************************************
+                    2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                                https://github.com/CodeProSpecialist
+                       Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+                ''')
+                print(f'Current date & time (Eastern Time): {current_time_str}')
+                print(f"Market is closed. Open hours: {market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')}")
+                print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
+                print("\n")
+                logging.info(f"{current_time_str}: Market is closed. Waiting for market open.")
+                time.sleep(60)
+        else:
+            print("\n")
+            print('''
+            *********************************************************************************
+            ************ Billionaire Buying Strategy Version ********************************
+            *********************************************************************************
+                2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                            https://github.com/CodeProSpecialist
+                   Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+            ''')
+            print(f'Current date & time (Eastern Time): {current_time_str}')
+            print("Market is closed today (holiday or weekend).")
+            print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
+            print("\n")
+            logging.info(f"{current_time_str}: Market is closed today (holiday or weekend).")
+            time.sleep(60)
 
 def remove_symbols_from_trade_list(symbol):
     if symbol in symbols_to_buy:
