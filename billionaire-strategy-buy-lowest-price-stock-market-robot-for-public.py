@@ -208,7 +208,8 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
     """Place MARKET order (fractional or full-share)"""
     url = f"{BASE_URL}/trading/{account_id}/order"
     order_id = str(uuid4())
-    expiration = {"timeInForce": "DAY"} if fractional else {"timeInForce": "GTD", "expirationTime": get_expiration()}
+    is_fractional = fractional or (amount is not None) or (quantity is not None and quantity % 1 != 0)
+    expiration = {"timeInForce": "DAY"} if is_fractional else {"timeInForce": "GTD", "expirationTime": get_expiration()}
     payload = {
         "orderId": order_id,
         "instrument": {"symbol": symbol, "type": "EQUITY"},
@@ -217,10 +218,14 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
         "expiration": expiration,
         "openCloseIndicator": "OPEN"
     }
-    if fractional and amount is not None:
+    if amount is not None:
         payload["amount"] = f"{amount:.2f}"
     elif quantity is not None:
-        payload["quantity"] = str(quantity)
+        if not is_fractional:
+            quantity = int(quantity)
+            payload["quantity"] = str(quantity)
+        else:
+            payload["quantity"] = f"{quantity:.4f}"
     else:
         raise ValueError("Must provide 'amount' for fractional orders or 'quantity' for full-share orders")
     try:
@@ -262,7 +267,7 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 "orderSide": side.upper(),
                 "orderType": "STOP_MARKET",
                 "stopPrice": stop_price,
-                "quantity": str(quantity),
+                "quantity": f"{quantity:.4f}" if quantity % 1 != 0 else str(int(quantity)),
                 "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()},
                 "openCloseIndicator": "OPEN"
             }
@@ -342,27 +347,32 @@ def client_cancel_order(order):
     order_id = order.get('orderId') or order.get('id')
     symbol = order.get('instrument', {}).get('symbol')
     cancel_url = f"{BASE_URL}/trading/{account_id}/order/{order_id}"
-    try:
-        resp = requests.delete(cancel_url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cancelled order {order_id} ({symbol})")
-        if resp.content:
-            try:
-                print("  Response:", json.dumps(resp.json(), indent=2))
-            except Exception:
-                print("  Response text:", resp.text)
-        return True
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Failed to cancel order {order_id} ({symbol}): {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            try:
-                print("  Response:", e.response.json())
-            except:
-                print("  Response text:", e.response.text)
-        return False
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            resp = requests.delete(cancel_url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cancelled order {order_id} ({symbol})")
+            if resp.content:
+                try:
+                    print("  Response:", json.dumps(resp.json(), indent=2))
+                except Exception:
+                    print("  Response text:", resp.text)
+            return True
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Attempt {attempt} failed to cancel order {order_id} ({symbol}): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    print("  Response:", e.response.json())
+                except:
+                    print("  Response text:", e.response.text)
+            if attempt < RETRY_COUNT:
+                time.sleep(2)
+            else:
+                print(f"Giving up on order {order_id} after {RETRY_COUNT} attempts.")
+                return False
 
 def ensure_no_open_orders(symbol):
-    """Ensure no non-final orders exist for a symbol before placing new orders, canceling each order only once."""
+    """Ensure no non-final orders exist for a symbol before placing new orders."""
     print(f"Checking for open orders for {symbol} before placing new order...")
     logging.info(f"Checking for open orders for {symbol}")
     all_orders = client_list_all_orders()
@@ -371,7 +381,7 @@ def ensure_no_open_orders(symbol):
         print(f"No open orders found for {symbol}.")
         logging.info(f"No open orders found for {symbol}")
         return True
-    print(f"Found {len(open_orders)} open orders for {symbol}. Attempting to cancel each once...")
+    print(f"Found {len(open_orders)} open orders for {symbol}. Initiating cancellation process...")
     logging.info(f"Found {len(open_orders)} open orders for {symbol}")
     for order in open_orders:
         if client_cancel_order(order):
@@ -380,8 +390,16 @@ def ensure_no_open_orders(symbol):
         else:
             print(f"Failed to cancel order {order.get('orderId') or order.get('id')} for {symbol}.")
             logging.error(f"Failed to cancel order {order.get('orderId') or order.get('id')} for {symbol}")
-    print(f"Completed cancellation attempts for {symbol}. Proceeding without further checks.")
-    logging.info(f"Completed cancellation attempts for {symbol}. Proceeding without further checks")
+    print("Waiting 30 seconds for cancellations to process...")
+    time.sleep(30)
+    all_orders = client_list_all_orders()
+    open_orders = [o for o in all_orders if o.get('instrument', {}).get('symbol') == symbol and o.get('status') not in ['FILLED', 'CANCELLED', 'REJECTED']]
+    if open_orders:
+        print(f"Warning: Still {len(open_orders)} open orders for {symbol} after final check.")
+        logging.warning(f"Still {len(open_orders)} open orders for {symbol} after final check")
+        return False
+    print(f"Confirmed: No open orders for {symbol}.")
+    logging.info(f"Confirmed: No open orders for {symbol}")
     return True
 
 @sleep_and_retry
