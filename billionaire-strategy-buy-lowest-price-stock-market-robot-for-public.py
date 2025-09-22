@@ -1166,7 +1166,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         buy_signal = 0
         acc = client_get_account()
         total_equity = acc['equity']
-        buying_power = float(acc['buying_power'])  # Fetch buying power
+        buying_power = float(acc['buying_power_cash'])  # Fetch buying power
         print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
         logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
         if buying_power <= 5.00:
