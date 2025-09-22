@@ -1733,9 +1733,9 @@ def main():
     print("Starting main function...")
     logging.info("Starting main function")
     initialize_csv()
-    if not YOUR_SECRET_KEY or not CALLMEBOT_API_KEY or not CALLMEBOT_PHONE:
-        logging.error("Missing required environment variables: YOUR_SECRET_KEY, CALLMEBOT_API_KEY, or CALLMEBOT_PHONE")
-        print("Missing required environment variables: YOUR_SECRET_KEY, CALLMEBOT_API_KEY, or CALLMEBOT_PHONE")
+    if not YOUR_SECRET_KEY:
+        logging.error("Missing required environment variable: YOUR_SECRET_KEY")
+        print("Missing required environment variable: YOUR_SECRET_KEY")
         return
     if not fetch_token_and_account():
         logging.error("Failed to initialize token and account. Exiting.")
