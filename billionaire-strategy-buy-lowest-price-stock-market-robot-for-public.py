@@ -1610,6 +1610,26 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                     print(f"Cannot sell {sym}: Open orders exist.")
                     logging.info(f"Cannot sell {sym}: Open orders exist.")
                     continue
+                print(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+                logging.info(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+                with open(csv_filename, mode='a', newline='') as csv_file:
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                    csv_writer.writerow({
+                        'Date': today_date_str,
+                        'Buy': 0,
+                        'Sell': sell_qty,
+                        'Quantity': sell_qty,
+                        'Symbol': sym,
+                        'Price Per Share': current_price
+                    })
+                    print(f"Logged intended sell for {sell_qty:.4f} shares of {sym} to CSV")
+                    logging.info(f"Logged intended sell for {sell_qty:.4f} shares of {sym} to CSV")
+                send_alert(
+                    f"Initiating sell of {sell_qty:.4f} shares of {sym} at ~${current_price:.2f}",
+                    subject=f"Trade Initiated: Sell {sym}"
+                )
+                print(f"Sent alert for intended sell of {sym}")
+                logging.info(f"Sent alert for intended sell of {sym}")
                 order_id = client_place_order(
                     symbol=sym,
                     side="SELL",
@@ -1619,7 +1639,9 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                 if order_id:
                     print(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
                     logging.info(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
-                    status_info = poll_order_status(order_id, timeout=300)
+                    status_info = poll_order_status(order_id, timeout=600)
+                    print(f"Status info for order {order_id}: {status_info}")
+                    logging.info(f"Status info for order {order_id}: {status_info}")
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
                         avg_price = status_info["avg_price"] or current_price
@@ -1657,10 +1679,14 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                                         'Symbol': sym,
                                         'Price Per Share': avg_price
                                     })
+                                    print(f"Logged filled sell for {filled_qty:.4f} shares of {sym} to CSV")
+                                    logging.info(f"Logged filled sell for {filled_qty:.4f} shares of {sym} to CSV")
                                 send_alert(
                                     f"Sold {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
                                     subject=f"Trade Executed: Sell {sym}"
                                 )
+                                print(f"Sent alert for filled sell of {sym}")
+                                logging.info(f"Sent alert for filled sell of {sym}")
                             except Exception as e:
                                 session.rollback()
                                 logging.error(f"Database error for {sym} sell: {e}")
@@ -1668,8 +1694,8 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
                             finally:
                                 session.close()
                     else:
-                        print(f"Sell order {order_id} for {sym} not filled.")
-                        logging.info(f"Sell order {order_id} for {sym} not filled.")
+                        print(f"Sell order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
+                        logging.warning(f"Sell order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
                 else:
                     print(f"Failed to place sell order for {sym}.")
                     logging.info(f"Failed to place sell order for {sym}.")
@@ -1680,7 +1706,7 @@ def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
         traceback.print_exc()
     finally:
         task_running['sell_stocks'] = False
-
+        
 def main():
     initialize_csv()
     while True:
