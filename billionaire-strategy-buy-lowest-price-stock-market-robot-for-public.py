@@ -1357,6 +1357,7 @@ def run_scheduled_tasks():
     print("Running scheduled tasks...")
     logging.info("Running scheduled tasks")
     try:
+        stop_if_stock_market_is_closed()
         sync_db_with_api()
         symbols_to_buy_list = get_symbols_to_buy()
         symbols_to_sell_dict = load_positions_from_database()
