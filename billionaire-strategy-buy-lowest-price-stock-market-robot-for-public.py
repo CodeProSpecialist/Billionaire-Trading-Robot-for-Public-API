@@ -465,33 +465,44 @@ def client_get_account():
         logging.error(f"Error fetching account info: {e}")
         return {}
 
+@sleep_and_retry
+@limits(calls=CALLS, period=PERIOD)
 def fetch_token_and_account():
-    global secret, access_token, account_id, HEADERS, last_token_fetch_time
+    """Fetch new access token and brokerage account ID using YOUR_SECRET_KEY."""
+    global access_token, account_id, HEADERS, last_token_fetch_time
     try:
-        if not YOUR_SECRET_KEY:
-            print("YOUR_SECRET_KEY is not set.")
-            logging.error("YOUR_SECRET_KEY is not set.")
-            return False
-        secret = YOUR_SECRET_KEY
-        url = f"{BASE_URL}/auth/token"
-        payload = {"secretKey": secret}
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(
+            "https://api.public.com/userapiauthservice/personal/access-tokens",
+            headers={"Content-Type": "application/json"},
+            json={"secret": YOUR_SECRET_KEY, "validityInMinutes": 1440},
+            timeout=10
+        )
+        print("Token endpoint response:", resp.status_code, resp.text)
         resp.raise_for_status()
-        data = resp.json()
-        access_token = data.get('accessToken')
-        account_id = data.get('accountId')
-        HEADERS = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-        last_token_fetch_time = time.time()
-        print(f"Token fetched successfully. Account ID: {account_id}")
-        logging.info(f"Token fetched successfully. Account ID: {account_id}")
+        access_token = resp.json().get("accessToken")
+        if not access_token:
+            raise ValueError("No access token returned")
+        resp = requests.get(
+            f"{BASE_URL}/trading/account",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            timeout=10
+        )
+        print("Account endpoint response:", resp.status_code, resp.text)
+        resp.raise_for_status()
+        accounts = resp.json().get("accounts", [])
+        brokerage = next((a for a in accounts if a.get("accountType") == "BROKERAGE"), None)
+        if not brokerage:
+            raise ValueError("No BROKERAGE account found")
+        account_id = brokerage["accountId"]
+        HEADERS = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+        last_token_fetch_time = datetime.now()
+        print(f"Access token and brokerage account fetched: {account_id}")
+        logging.info(f"Access token and brokerage account fetched: {account_id}")
         return True
     except Exception as e:
-        logging.error(f"Error fetching token: {e}")
-        print(f"Error fetching token: {e}")
+        print("Error fetching token/account:", e)
+        logging.error("Error fetching token/account:")
+        traceback.print_exc()
         return False
 
 def refresh_token_if_needed():
