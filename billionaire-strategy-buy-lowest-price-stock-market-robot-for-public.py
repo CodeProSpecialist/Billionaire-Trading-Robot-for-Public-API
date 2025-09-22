@@ -1166,8 +1166,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         buy_signal = 0
         acc = client_get_account()
         total_equity = acc['equity']
-        print(f"Total account equity: ${total_equity:.2f}")
-        logging.info(f"Total account equity: ${total_equity:.2f}")
+        buying_power = float(acc['buying_power'])  # Fetch buying power
+        print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+        logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+        if buying_power <= 5.00:
+            print("Buying power <= $5.00. Skipping all buys.")
+            logging.info("Buying power <= $5.00. Skipping all buys.")
+            return
         positions = client_list_positions()
         current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
         max_new_exposure = total_equity * 0.98 - current_exposure
@@ -1411,6 +1416,26 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                 logging.info(f"Calculated quantity for {sym} is zero. Skipping buy.")
                 continue
             with buy_sell_lock:
+                print(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+                logging.info(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+                with open(csv_filename, mode='a', newline='') as csv_file:
+                    csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                    csv_writer.writerow({
+                        'Date': today_date_str,
+                        'Buy': buy_qty,
+                        'Sell': 0,
+                        'Quantity': buy_qty,
+                        'Symbol': sym,
+                        'Price Per Share': current_price
+                    })
+                    print(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
+                    logging.info(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
+                send_alert(
+                    f"Initiating buy of {buy_qty:.4f} shares of {sym} at ~${current_price:.2f}",
+                    subject=f"Trade Initiated: Buy {sym}"
+                )
+                print(f"Sent alert for intended buy of {sym}")
+                logging.info(f"Sent alert for intended buy of {sym}")
                 order_id = client_place_order(
                     symbol=sym,
                     side="BUY",
@@ -1421,7 +1446,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                     buy_signal += 1
                     print(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
                     logging.info(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
-                    status_info = poll_order_status(order_id, timeout=300)
+                    status_info = poll_order_status(order_id, timeout=600)
+                    print(f"Status info for order {order_id}: {status_info}")
+                    logging.info(f"Status info for order {order_id}: {status_info}")
                     if status_info and status_info["status"] == "FILLED":
                         filled_qty = status_info["filled_qty"]
                         avg_price = status_info["avg_price"] or current_price
@@ -1468,10 +1495,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                                         'Symbol': sym,
                                         'Price Per Share': avg_price
                                     })
+                                    print(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
+                                    logging.info(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
                                 send_alert(
                                     f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
                                     subject=f"Trade Executed: Buy {sym}"
                                 )
+                                print(f"Sent alert for filled buy of {sym}")
+                                logging.info(f"Sent alert for filled buy of {sym}")
                                 symbols_to_remove.append(sym)
                             except Exception as e:
                                 session.rollback()
@@ -1480,8 +1511,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
                             finally:
                                 session.close()
                     else:
-                        print(f"Buy order {order_id} for {sym} not filled.")
-                        logging.info(f"Buy order {order_id} for {sym} not filled.")
+                        print(f"Buy order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
+                        logging.warning(f"Buy order {order_id} for {sym} not filled. Status: {status_info.get('status') if status_info else 'Timeout/None'}")
                 else:
                     print(f"Failed to place buy order for {sym}.")
                     logging.info(f"Failed to place buy order for {sym}.")
@@ -1504,7 +1535,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list, buy_sell_lock):
         traceback.print_exc()
     finally:
         task_running['buy_stocks'] = False
-
+        
 def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
     if task_running['sell_stocks']:
         print("sell_stocks already running. Skipping.")
