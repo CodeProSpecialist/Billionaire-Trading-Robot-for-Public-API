@@ -342,32 +342,27 @@ def client_cancel_order(order):
     order_id = order.get('orderId') or order.get('id')
     symbol = order.get('instrument', {}).get('symbol')
     cancel_url = f"{BASE_URL}/trading/{account_id}/order/{order_id}"
-    for attempt in range(1, RETRY_COUNT + 1):
-        try:
-            resp = requests.delete(cancel_url, headers=HEADERS, timeout=10)
-            resp.raise_for_status()
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cancelled order {order_id} ({symbol})")
-            if resp.content:
-                try:
-                    print("  Response:", json.dumps(resp.json(), indent=2))
-                except Exception:
-                    print("  Response text:", resp.text)
-            return True
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Attempt {attempt} failed to cancel order {order_id} ({symbol}): {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    print("  Response:", e.response.json())
-                except:
-                    print("  Response text:", e.response.text)
-            if attempt < RETRY_COUNT:
-                time.sleep(2)
-            else:
-                print(f"Giving up on order {order_id} after {RETRY_COUNT} attempts.")
-                return False
+    try:
+        resp = requests.delete(cancel_url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Cancelled order {order_id} ({symbol})")
+        if resp.content:
+            try:
+                print("  Response:", json.dumps(resp.json(), indent=2))
+            except Exception:
+                print("  Response text:", resp.text)
+        return True
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Failed to cancel order {order_id} ({symbol}): {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                print("  Response:", e.response.json())
+            except:
+                print("  Response text:", e.response.text)
+        return False
 
 def ensure_no_open_orders(symbol):
-    """Ensure no non-final orders exist for a symbol before placing new orders."""
+    """Ensure no non-final orders exist for a symbol before placing new orders, canceling each order only once."""
     print(f"Checking for open orders for {symbol} before placing new order...")
     logging.info(f"Checking for open orders for {symbol}")
     all_orders = client_list_all_orders()
@@ -376,7 +371,7 @@ def ensure_no_open_orders(symbol):
         print(f"No open orders found for {symbol}.")
         logging.info(f"No open orders found for {symbol}")
         return True
-    print(f"Found {len(open_orders)} open orders for {symbol}. Initiating cancellation process...")
+    print(f"Found {len(open_orders)} open orders for {symbol}. Attempting to cancel each once...")
     logging.info(f"Found {len(open_orders)} open orders for {symbol}")
     for order in open_orders:
         if client_cancel_order(order):
@@ -385,16 +380,8 @@ def ensure_no_open_orders(symbol):
         else:
             print(f"Failed to cancel order {order.get('orderId') or order.get('id')} for {symbol}.")
             logging.error(f"Failed to cancel order {order.get('orderId') or order.get('id')} for {symbol}")
-    print("Waiting 30 seconds for cancellations to process...")
-    time.sleep(30)
-    all_orders = client_list_all_orders()
-    open_orders = [o for o in all_orders if o.get('instrument', {}).get('symbol') == symbol and o.get('status') not in ['FILLED', 'CANCELLED', 'REJECTED']]
-    if open_orders:
-        print(f"Warning: Still {len(open_orders)} open orders for {symbol} after final check.")
-        logging.warning(f"Still {len(open_orders)} open orders for {symbol} after final check")
-        return False
-    print(f"Confirmed: No open orders for {symbol}.")
-    logging.info(f"Confirmed: No open orders for {symbol}")
+    print(f"Completed cancellation attempts for {symbol}. Proceeding without further checks.")
+    logging.info(f"Completed cancellation attempts for {symbol}. Proceeding without further checks")
     return True
 
 @sleep_and_retry
