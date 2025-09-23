@@ -74,7 +74,7 @@ pip3 install sqlalchemy
 pip3 install ratelimit
 pip3 install numpy
 pip3 install pandas
-pip3 install twilio
+pip3 install traceback
 
 # Verify installations
 echo "Verifying installed packages..."
