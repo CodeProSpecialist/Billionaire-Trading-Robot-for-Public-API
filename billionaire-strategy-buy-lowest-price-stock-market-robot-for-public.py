@@ -1182,9 +1182,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
         buying_power = float(acc['buying_power_cash'])  # Fetch buying power
         print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
         logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-        if buying_power <= 8.00:  # Ensure buying power > $8 before any buys
-            print("Buying power <= $8.00. Skipping all buys to maintain minimum balance.")
-            logging.info("Buying power <= $8.00. Skipping all buys to maintain minimum balance.")
+        if buying_power < 10.00:  # Ensure buying power >= $10 for any buys
+            print("Buying power < $10.00. Skipping all buys to maintain minimum balance.")
+            logging.info("Buying power < $10.00. Skipping all buys to maintain minimum balance.")
             return
         positions = client_list_positions()
         current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
@@ -1219,7 +1219,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             return
         min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
         day_5_prices = get_last_price_within_past_5_days(valid_symbols)
-        dollar_amount = 5.0  # Fixed $5 order
+        if ALL_BUY_ORDERS_ARE_5_DOLLARS or buying_power < 200:
+            dollar_amount = 5.0  # Fixed $5 order when buying power < $200
+        else:
+            dollar_amount = max_new_exposure / len(valid_symbols)
         # Ensure dollar_amount leaves at least $10 in buying power
         max_dollar_amount = buying_power - 10.00
         if dollar_amount > max_dollar_amount:
@@ -1230,6 +1233,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             print("Calculated dollar amount for buys is <= 0. Skipping buys.")
             logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
             return
+        # Limit to a single $5 buy order when buying power < $200
+        if buying_power < 200:
+            valid_symbols = valid_symbols[:1]  # Process only the first valid symbol
+            print(f"Buying power < $200. Limiting to a single $5 buy order.")
+            logging.info("Buying power < $200. Limiting to a single $5 buy order.")
         for sym in valid_symbols:
             print(f"\n{'='*60}")
             print(f"Processing {sym}...")
@@ -1536,6 +1544,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 print(f"Failed to place buy order for {sym}.")
                 logging.info(f"Failed to place buy order for {sym}.")
             time.sleep(1)
+            # Break after one buy if buying power was < $200
+            if buying_power < 200:
+                print("Completed single buy order for low buying power. Stopping further buys.")
+                logging.info("Completed single buy order for low buying power. Stopping further buys.")
+                break
         for sym in symbols_to_remove:
             remove_symbols_from_trade_list(sym)
         print(f"\nBuy signals generated: {buy_signal}")
