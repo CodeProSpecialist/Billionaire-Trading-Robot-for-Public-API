@@ -90,6 +90,8 @@ task_running = {
     'refresh_token_if_needed': False
 }  # Task running flags
 
+db_lock = threading.Lock()
+
 # Timezone
 eastern = pytz.timezone('US/Eastern')
 
