@@ -78,20 +78,18 @@ pip3 install traceback
 
 # Verify installations
 echo "Verifying installed packages..."
-pip3 list | grep -E "schedule|pytz|requests|yfinance|ta-lib|pandas-market-calendars|sqlalchemy|ratelimit|numpy|pandas|twilio"
+pip3 list | grep -E "schedule|pytz|requests|yfinance|ta-lib|pandas-market-calendars|sqlalchemy|ratelimit|numpy|pandas"
 
 # Check for environment variable setup (without modifying .bashrc)
 echo "Checking for environment variable setup..."
-if [ -z "$YOUR_SECRET_KEY" ] || [ -z "$TWILIO_SID" ] || [ -z "$TWILIO_TOKEN" ] || [ -z "$TWILIO_PHONE" ] || [ -z "$ALERT_PHONE" ]; then
+if [ -z "$YOUR_SECRET_KEY" ] || [ -z "$CALLMEBOT_API_KEY" ] || [ -z "$CALLMEBOT_PHONE" ]; then
     echo "${RED}Warning: Some environment variables are not set.${NC}"
     echo "YOUR_SECRET_KEY is the API secret key from Public.com (obtain from https://public.com/developers or your account settings)."
-    echo "TWILIO_SID, TWILIO_TOKEN, TWILIO_PHONE, and ALERT_PHONE are for Twilio SMS alerts (obtain from https://www.twilio.com)."
+    echo "CALLMEBOT_API_KEY and CALLMEBOT_PHONE are for CallMeBot WhatsApp alerts (obtain from https://www.callmebot.com)."
     echo "Please set these variables in your current session before running the script, e.g.:"
     echo "export YOUR_SECRET_KEY='your-public-com-api-secret-key'"
-    echo "export TWILIO_SID='your-twilio-sid'"
-    echo "export TWILIO_TOKEN='your-twilio-token'"
-    echo "export TWILIO_PHONE='your-twilio-phone'"
-    echo "export ALERT_PHONE='your-alert-phone'"
+    echo "export CALLMEBOT_API_KEY='your-callmebot-api-key'"
+    echo "export CALLMEBOT_PHONE='your-callmebot-phone'"
 else
     echo "${GREEN}Environment variables are set.${NC}"
 fi
