@@ -42,7 +42,7 @@ Unlock the power of algorithmic trading with the **Billionaire Strategy Trading 
 ## 🔍 Key Features
 
 - **Smart Order Placement:** Automatically identifies and buys the lowest-priced stocks meeting your criteria.  
-- **Fractional Share Support:** Invest as little as $1 per trade, maximizing your portfolio's potential.  
+- **Fractional Share Support:** Invest as little as $5 per trade, maximizing your portfolio's potential.  
 - **Risk Management:** Sets stop-loss orders to protect gains and minimize losses.  
 - **Real-Time Monitoring:** Continuously tracks market conditions to optimize trading decisions.  
 - **Comprehensive Logging:** Keeps detailed records of all trades for transparency and analysis.  
