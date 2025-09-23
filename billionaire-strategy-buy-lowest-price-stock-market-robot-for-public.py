@@ -1081,50 +1081,68 @@ def send_alert(message, subject="Trading Bot Alert"):
         print(f"Error sending WhatsApp alert: {e}")
 
 def stop_if_stock_market_is_closed():
+    # Initialize NYSE calendar
     nyse = mcal.get_calendar('NYSE')
+    eastern = pytz.timezone('US/Eastern')
+    
+    def print_banner(current_time_str):
+        print("\n")
+        print('''
+        *********************************************************************************
+        ************ Billionaire Buying Strategy Version ********************************
+        *********************************************************************************
+            2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
+                        https://github.com/CodeProSpecialist
+               Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
+        ''')
+        return current_time_str
+
     while True:
-        eastern = pytz.timezone('US/Eastern')
-        current_datetime = datetime.now(eastern)
-        current_time_str = current_datetime.strftime("%A, %B %d, %Y, %I:%M:%S %p")
-        schedule = nyse.schedule(start_date=current_datetime.date(), end_date=current_datetime.date())
-        if not schedule.empty:
-            market_open = schedule.iloc[0]['market_open'].astimezone(eastern)
-            market_close = schedule.iloc[0]['market_close'].astimezone(eastern)
-            if market_open <= current_datetime <= market_close:
-                print("Market is open. Proceeding with trading operations.")
-                logging.info(f"{current_time_str}: Market is open. Proceeding with trading operations.")
-                break
+        try:
+            # Get current time in Eastern Time
+            current_datetime = datetime.now(eastern)
+            current_time_str = current_datetime.strftime("%A, %B %d, %Y, %I:%M:%S %p")
+            
+            # Get NYSE schedule for the current date
+            schedule = nyse.schedule(start_date=current_datetime.date(), end_date=current_datetime.date())
+            
+            if not schedule.empty:
+                market_open = schedule.iloc[0]['market_open'].tz_convert(eastern)
+                market_close = schedule.iloc[0]['market_close'].tz_convert(eastern)
+                
+                if market_open <= current_datetime <= market_close:
+                    print("Market is open. Proceeding with trading operations.")
+                    logging.info(f"{current_time_str}: Market is open. Proceeding with trading operations.")
+                    break
+                else:
+                    print_banner(current_time_str)
+                    print(f'Current date & time (Eastern Time): {current_time_str}')
+                    print(f"Market is closed. Open hours: {market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')}")
+                    print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
+                    logging.info(f"{current_time_str}: Market is closed. Waiting for market open.")
+                    
+                    # Calculate sleep time until market open
+                    seconds_until_open = (market_open - current_datetime).total_seconds()
+                    if seconds_until_open > 0:
+                        time.sleep(min(seconds_until_open, 3600))  # Sleep up to 1 hour
+                    else:
+                        time.sleep(60)  # Default sleep if already past open time
             else:
-                print("\n")
-                print('''
-                *********************************************************************************
-                ************ Billionaire Buying Strategy Version ********************************
-                *********************************************************************************
-                    2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
-                                https://github.com/CodeProSpecialist
-                       Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
-                ''')
+                print_banner(current_time_str)
                 print(f'Current date & time (Eastern Time): {current_time_str}')
-                print(f"Market is closed. Open hours: {market_open.strftime('%I:%M %p')} - {market_close.strftime('%I:%M %p')}")
+                print("Market is closed today (holiday or weekend).")
                 print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
-                print("\n")
-                logging.info(f"{current_time_str}: Market is closed. Waiting for market open.")
-                time.sleep(60)
-        else:
-            print("\n")
-            print('''
-            *********************************************************************************
-            ************ Billionaire Buying Strategy Version ********************************
-            *********************************************************************************
-                2025 Edition of the Advanced Stock Market Trading Robot, Version 8 
-                            https://github.com/CodeProSpecialist
-                   Featuring an Accelerated Database Engine with Python 3 SQLAlchemy  
-            ''')
-            print(f'Current date & time (Eastern Time): {current_time_str}')
-            print("Market is closed today (holiday or weekend).")
-            print("Waiting until Stock Market Hours to begin the Stockbot Trading Program.")
-            print("\n")
-            logging.info(f"{current_time_str}: Market is closed today (holiday or weekend).")
+                logging.info(f"{current_time_str}: Market is closed today (holiday or weekend).")
+                
+                # Sleep until midnight of the next day
+                next_day = current_datetime.date() + timedelta(days=1)
+                next_day_midnight = eastern.localize(datetime(next_day.year, next_day.month, next_day.day))
+                seconds_until_next_day = (next_day_midnight - current_datetime).total_seconds()
+                time.sleep(min(seconds_until_next_day, 3600))  # Sleep up to 1 hour
+                
+        except Exception as e:
+            logging.error(f"{current_time_str}: Error checking market status: {str(e)}")
+            print(f"Error checking market status: {str(e)}. Retrying in 60 seconds.")
             time.sleep(60)
 
 YF_CALLS_PER_MINUTE = 60
