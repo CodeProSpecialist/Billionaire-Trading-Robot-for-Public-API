@@ -1223,6 +1223,17 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             dollar_amount = 5.0
         else:
             dollar_amount = max_new_exposure / len(valid_symbols)
+            # Enforce minimum buy order of $5.00
+            if dollar_amount < 5.0:
+                dollar_amount = 5.0
+                print(f"Adjusted dollar_amount to minimum $5.00 for each symbol.")
+                logging.info(f"Adjusted dollar_amount to minimum $5.00 for each symbol.")
+        # Check if total required funds exceed buying power
+        total_required = dollar_amount * len(valid_symbols)
+        if total_required > buying_power:
+            print(f"Total required funds (${total_required:.2f}) exceed buying power (${buying_power:.2f}). Skipping buys.")
+            logging.info(f"Total required funds (${total_required:.2f}) exceed buying power (${buying_power:.2f}). Skipping buys.")
+            return
         if dollar_amount <= 0:
             print("Calculated dollar amount for buys is <= 0. Skipping buys.")
             logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
