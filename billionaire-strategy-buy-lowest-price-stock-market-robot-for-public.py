@@ -1219,10 +1219,17 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             return
         min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
         day_5_prices = get_last_price_within_past_5_days(valid_symbols)
-        if ALL_BUY_ORDERS_ARE_5_DOLLARS or buying_power < 200:
-            dollar_amount = 5.0  # Fixed $5 order when buying power < $200
+        
+        # Determine dollar allocation per symbol
+        if ALL_BUY_ORDERS_ARE_5_DOLLARS or buying_power < 1000:
+            dollar_amount = 5.0  # Fixed $5 order when buying power < $1000
         else:
-            dollar_amount = max_new_exposure / len(valid_symbols)
+            # Avoid division by zero if no valid symbols
+            if len(valid_symbols) > 0:
+                dollar_amount = max_new_exposure / len(valid_symbols)
+            else:
+                dollar_amount = 0.0
+        
         # Ensure dollar_amount leaves at least $10 in buying power
         max_dollar_amount = buying_power - 10.00
         if dollar_amount > max_dollar_amount:
@@ -1233,11 +1240,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             print("Calculated dollar amount for buys is <= 0. Skipping buys.")
             logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
             return
-        # Limit to a single $5 buy order when buying power < $200
-        if buying_power < 200:
+        
+        # Limit to a single $5 buy order when buying power < $1000
+        if buying_power < 1000:
             valid_symbols = valid_symbols[:1]  # Process only the first valid symbol
-            print(f"Buying power < $200. Limiting to a single $5 buy order.")
-            logging.info("Buying power < $200. Limiting to a single $5 buy order.")
+            print(f"Buying power < $1000. Limiting to a single $5 buy order.")
+            logging.info("Buying power < $1000. Limiting to a single $5 buy order.")
+        
         for sym in valid_symbols:
             print(f"\n{'='*60}")
             print(f"Processing {sym}...")
@@ -1269,6 +1278,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 change_color = GREEN if min_vs_day_change >= 0 else RED
                 print(f"5-min price: ${min_5_price:.4f} vs 5-day close: ${day_5_price:.2f} | Change: {change_color}{min_vs_day_change:.2f}%{RESET}")
                 logging.info(f"5-min price: ${min_5_price:.4f} vs 5-day close: ${day_5_price:.2f} | Change: {min_vs_day_change:.2f}%")
+            
             current_timestamp = time.time()
             if sym not in price_history:
                 price_history[sym] = {interval: [] for interval in interval_map}
@@ -1292,6 +1302,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
                 logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
                 continue
+
+            # Legacy scoring logic
             score = 0
             close = df['Close'].values
             open_ = df['Open'].values
@@ -1300,6 +1312,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             lookback_candles = min(20, len(close))
             print(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
             logging.info(f"Data for {yf_symbol}: rows={len(df)}, close_length={len(close)}, NaN_count={np.isnan(close).sum()}")
+
             try:
                 rsi = talib.RSI(close, timeperiod=14)
                 latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
@@ -1317,10 +1330,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 latest_rsi = 50.00
                 print(f"Latest RSI: 50.00")
                 logging.info(f"Latest RSI: 50.00")
+
             if close[-1] <= close[-2] * 0.997:
                 score += 1
                 print(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
                 logging.info(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
+
+            # Bullish reversal pattern detection
             print(f"Checking for bullish reversal patterns in {sym}...")
             logging.info(f"Checking for bullish reversal patterns in {sym}")
             bullish_reversal_detected = False
@@ -1336,6 +1352,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 'Inverted Hammer': talib.CDLINVERTEDHAMMER,
                 'Tweezer Bottom': talib.CDLMATCHINGLOW
             }
+
             valid_mask = ~np.isnan(open_) & ~np.isnan(high) & ~np.isnan(low) & ~np.isnan(close)
             if valid_mask.sum() < 2:
                 print(f"Insufficient valid data for {sym} after removing NaN values. Skipping candlestick analysis.")
@@ -1345,6 +1362,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             high_valid = np.array(high[valid_mask], dtype=np.float64)
             low_valid = np.array(low[valid_mask], dtype=np.float64)
             close_valid = np.array(close[valid_mask], dtype=np.float64)
+
             for i in range(-1, -lookback_candles, -1):
                 if abs(i) > len(open_valid):
                     continue
@@ -1364,10 +1382,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                     print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     continue
+
             if score < 3:
                 print(f"{yf_symbol}: Score too low ({score} < 3). Skipping.")
                 logging.info(f"{yf_symbol}: Score too low ({score} < 3). Skipping")
                 continue
+
+            # Volume metrics
             print(f"Calculating volume metrics for {sym}...")
             logging.info(f"Calculating volume metrics for {sym}")
             recent_avg_volume = df['Volume'].iloc[-5:].mean() if len(df) >= 5 else 0
@@ -1375,6 +1396,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             volume_decrease = recent_avg_volume < prior_avg_volume if len(df) >= 10 else False
             print(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
             logging.info(f"{yf_symbol}: Recent avg volume = {recent_avg_volume:.0f}, Prior avg volume = {prior_avg_volume:.0f}, Volume decrease = {volume_decrease}")
+
+            # RSI metrics
             print(f"Calculating RSI metrics for {sym}...")
             logging.info(f"Calculating RSI metrics for {sym}")
             try:
@@ -1404,6 +1427,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             price_increase = current_price > previous_price * 1.005
             print(f"{yf_symbol}: Price increase check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
             logging.info(f"{yf_symbol}: Price increase check: Current = ${current_price:.2f}, Previous = ${previous_price:.2f}, Increase = {price_increase}")
+
+            # Price drop check based on last 5-min price
             print(f"Checking price drop for {sym}...")
             logging.info(f"Checking price drop for {sym}")
             last_price = min_5_prices.get(sym)
@@ -1416,32 +1441,44 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                     print(f"Error fetching last closing price for {yf_symbol}: {e}")
                     logging.error(f"Error fetching last closing price for {yf_symbol}: {e}")
                     continue
+
             price_decline_threshold = last_price * (1 - 0.002)
             price_decline = current_price <= price_decline_threshold
             print(f"{yf_symbol}: Price decline check: Current = {GREEN if current_price > previous_price else RED}${current_price:.2f}{RESET}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
             logging.info(f"{yf_symbol}: Price decline check: Current = ${current_price:.2f}, Threshold = ${price_decline_threshold:.2f}, Decline = {price_decline}")
+
+            # Short-term trend analysis
             short_term_trend = None
             if sym in price_history and '5min' in price_history[sym] and len(price_history[sym]['5min']) >= 2:
                 recent_prices = price_history[sym]['5min'][-2:]
                 short_term_trend = 'up' if recent_prices[-1] > recent_prices[-2] else 'down'
                 print(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
                 logging.info(f"{yf_symbol}: Short-term price trend (5min): {short_term_trend}")
+
+            # Print interval price history
             if detected_patterns and sym in price_history:
                 for interval, prices in price_history[sym].items():
                     if len(prices) >= 2:
                         print(f"{yf_symbol}: {interval} interval price history: {prices[-2:]}")
                         logging.info(f"{yf_symbol}: {interval} interval price history: {prices[-2:]}")
+
+            # Ensure no open orders exist
             if not ensure_no_open_orders(sym):
                 print(f"Cannot buy {sym}: Open orders exist.")
                 logging.info(f"Cannot buy {sym}: Open orders exist.")
                 continue
+
+            # Buy quantity calculation
             buy_qty = dollar_amount / current_price if FRACTIONAL_BUY_ORDERS else int(dollar_amount / current_price)
             if buy_qty == 0:
                 print(f"Calculated quantity for {sym} is zero. Skipping buy.")
                 logging.info(f"Calculated quantity for {sym} is zero. Skipping buy.")
                 continue
+
             print(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
             logging.info(f"Preparing to buy {buy_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+
+            # Log intended buy to CSV
             with open(csv_filename, mode='a', newline='') as csv_file:
                 csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                 csv_writer.writerow({
@@ -1454,28 +1491,38 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 })
                 print(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
                 logging.info(f"Logged intended buy for {buy_qty:.4f} shares of {sym} to CSV")
+
+            # Send alert for intended buy
             send_alert(
                 f"Initiating buy of {buy_qty:.4f} shares of {sym} at ~${current_price:.2f}",
                 subject=f"Trade Initiated: Buy {sym}"
             )
             print(f"Sent alert for intended buy of {sym}")
             logging.info(f"Sent alert for intended buy of {sym}")
+
+            # Place buy order
             order_id = client_place_order(
                 symbol=sym,
                 side="BUY",
                 amount=dollar_amount if FRACTIONAL_BUY_ORDERS else None,
                 quantity=buy_qty if not FRACTIONAL_BUY_ORDERS else None
             )
+
             if order_id:
                 buy_signal += 1
                 print(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
                 logging.info(f"Buy order placed for {sym}: ${dollar_amount:.2f} (Qty: {buy_qty:.4f}) | Order ID: {order_id}")
+
+                # Poll for order status
                 status_info = poll_order_status(order_id, timeout=600)
                 print(f"Status info for order {order_id}: {status_info}")
                 logging.info(f"Status info for order {order_id}: {status_info}")
+
                 if status_info and status_info["status"] == "FILLED":
                     filled_qty = status_info["filled_qty"]
                     avg_price = status_info["avg_price"] or current_price
+
+                    # Record trade in database
                     session = SessionLocal()
                     try:
                         trade = TradeHistory(
@@ -1486,6 +1533,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                             date=today_date_str
                         )
                         session.add(trade)
+
+                        # Update or create position
                         position = session.query(Position).filter_by(symbols=sym).first()
                         if position:
                             total_qty = position.quantity + filled_qty
@@ -1501,13 +1550,18 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                                 purchase_date=today_date_str
                             )
                             session.add(position)
+
+                        # Place stop loss
                         stop_order_id, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
                         if stop_order_id:
                             position.stop_order_id = stop_order_id
                             position.stop_price = stop_price
+
                         session.commit()
                         print(f"Recorded buy for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
                         logging.info(f"Recorded buy for {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}")
+
+                        # Log filled buy to CSV
                         with open(csv_filename, mode='a', newline='') as csv_file:
                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                             csv_writer.writerow({
@@ -1520,17 +1574,22 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                             })
                             print(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
                             logging.info(f"Logged filled buy for {filled_qty:.4f} shares of {sym} to CSV")
+
+                        # Send alert for filled buy
                         send_alert(
                             f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
                             subject=f"Trade Executed: Buy {sym}"
                         )
                         print(f"Sent alert for filled buy of {sym}")
                         logging.info(f"Sent alert for filled buy of {sym}")
+
                         symbols_to_remove.append(sym)
+
                         # Update buying power after successful buy
                         buying_power -= dollar_amount
                         print(f"Updated buying power: ${buying_power:.2f}")
                         logging.info(f"Updated buying power: ${buying_power:.2f}")
+
                     except Exception as e:
                         session.rollback()
                         logging.error(f"Database error for {sym} buy: {e}")
@@ -1543,29 +1602,41 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             else:
                 print(f"Failed to place buy order for {sym}.")
                 logging.info(f"Failed to place buy order for {sym}.")
+
             time.sleep(1)
-            # Break after one buy if buying power was < $200
-            if buying_power < 200:
+
+            # Break after single buy if buying power < $1000
+            if buying_power < 1000:
                 print("Completed single buy order for low buying power. Stopping further buys.")
                 logging.info("Completed single buy order for low buying power. Stopping further buys.")
                 break
+
+        # Remove successfully bought symbols from trade list
         for sym in symbols_to_remove:
             remove_symbols_from_trade_list(sym)
+
         print(f"\nBuy signals generated: {buy_signal}")
         logging.info(f"Buy signals generated: {buy_signal}")
+
+        # Optionally print symbols to buy
         if PRINT_SYMBOLS_TO_BUY:
             print(f"\nSymbols to buy: {symbols_to_buy_list}")
             logging.info(f"Symbols to buy: {symbols_to_buy_list}")
+
+        # Optionally print symbols to sell from database
         if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
             print("\nCurrent symbols to sell from database:")
             for sym, (avg_price, purchase_date) in symbols_to_sell_dict.items():
                 print(f"{sym} | Avg Price: ${avg_price:.2f} | Purchase Date: {purchase_date}")
             logging.info(f"Current symbols to sell: {list(symbols_to_sell_dict.keys())}")
+
     except Exception as e:
         logging.error(f"Error in buy_stocks: {e}")
         print(f"Error in buy_stocks: {e}")
         traceback.print_exc()
+
     finally:
+        # Reset the running task flag
         task_running['buy_stocks'] = False
         
 def sell_stocks(symbols_to_sell_dict):
