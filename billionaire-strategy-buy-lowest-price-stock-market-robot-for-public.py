@@ -1182,9 +1182,9 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
         buying_power = float(acc['buying_power_cash'])  # Fetch buying power
         print(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
         logging.info(f"Total account equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-        if buying_power <= 5.00:
-            print("Buying power <= $5.00. Skipping all buys.")
-            logging.info("Buying power <= $5.00. Skipping all buys.")
+        if buying_power <= 8.00:  # Ensure buying power > $8 before any buys
+            print("Buying power <= $8.00. Skipping all buys to maintain minimum balance.")
+            logging.info("Buying power <= $8.00. Skipping all buys to maintain minimum balance.")
             return
         positions = client_list_positions()
         current_exposure = sum(float(p['qty'] * (rate_limited_get_quote(p['symbol']) or p['avg_entry_price'])) for p in positions)
@@ -1219,21 +1219,13 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             return
         min_5_prices = get_last_price_within_past_5_minutes(valid_symbols)
         day_5_prices = get_last_price_within_past_5_days(valid_symbols)
-        if ALL_BUY_ORDERS_ARE_5_DOLLARS:
-            dollar_amount = 5.0
-        else:
-            dollar_amount = max_new_exposure / len(valid_symbols)
-            # Enforce minimum buy order of $5.00
-            if dollar_amount < 5.0:
-                dollar_amount = 5.0
-                print(f"Adjusted dollar_amount to minimum $5.00 for each symbol.")
-                logging.info(f"Adjusted dollar_amount to minimum $5.00 for each symbol.")
-        # Check if total required funds exceed buying power
-        total_required = dollar_amount * len(valid_symbols)
-        if total_required > buying_power:
-            print(f"Total required funds (${total_required:.2f}) exceed buying power (${buying_power:.2f}). Skipping buys.")
-            logging.info(f"Total required funds (${total_required:.2f}) exceed buying power (${buying_power:.2f}). Skipping buys.")
-            return
+        dollar_amount = 5.0  # Fixed $5 order
+        # Ensure dollar_amount leaves at least $10 in buying power
+        max_dollar_amount = buying_power - 10.00
+        if dollar_amount > max_dollar_amount:
+            dollar_amount = max_dollar_amount
+            print(f"Adjusted dollar amount to ${dollar_amount:.2f} to maintain $10 minimum buying power.")
+            logging.info(f"Adjusted dollar amount to ${dollar_amount:.2f} to maintain $10 minimum buying power.")
         if dollar_amount <= 0:
             print("Calculated dollar amount for buys is <= 0. Skipping buys.")
             logging.info("Calculated dollar amount for buys is <= 0. Skipping buys.")
@@ -1253,6 +1245,11 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             if current_price is None:
                 print(f"No valid price data for {sym}.")
                 logging.info(f"No valid price data for {sym}")
+                continue
+            # Check if buy would leave less than $10 in buying power
+            if buying_power - dollar_amount < 10.00:
+                print(f"Cannot buy {sym}: Would leave less than $10 in buying power (Current: ${buying_power:.2f}).")
+                logging.info(f"Cannot buy {sym}: Would leave less than $10 in buying power (Current: ${buying_power:.2f}).")
                 continue
             current_color = GREEN if current_price >= 0 else RED
             print(f"Current price for {sym}: {current_color}${current_price:.4f}{RESET}")
@@ -1522,6 +1519,10 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                         print(f"Sent alert for filled buy of {sym}")
                         logging.info(f"Sent alert for filled buy of {sym}")
                         symbols_to_remove.append(sym)
+                        # Update buying power after successful buy
+                        buying_power -= dollar_amount
+                        print(f"Updated buying power: ${buying_power:.2f}")
+                        logging.info(f"Updated buying power: ${buying_power:.2f}")
                     except Exception as e:
                         session.rollback()
                         logging.error(f"Database error for {sym} buy: {e}")
