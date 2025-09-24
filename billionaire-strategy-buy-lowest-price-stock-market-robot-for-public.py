@@ -1483,7 +1483,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
     finally:
         task_running['buy_stocks'] = False
         
-def sell_stocks(symbols_to_sell_dict, buy_sell_lock):
+def sell_stocks(symbols_to_sell_dict):
     if task_running['sell_stocks']:
         print("sell_stocks already running. Skipping.")
         logging.info("sell_stocks already running. Skipping")
