@@ -1440,9 +1440,18 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                             )
                             session.add(position)
                         order_id_stop, stop_price = place_stop_loss_order(sym, filled_qty, avg_price)
-                        if order_id_stop:
+                        # Modified: Check if order_id_stop is a valid string to prevent database errors
+                        if order_id_stop and isinstance(order_id_stop, str):
                             position.stop_order_id = order_id_stop
                             position.stop_price = stop_price
+                        else:
+                            logging.warning(f"No stop-loss order placed for {sym} (Fractional or failed).")
+                            print(f"No stop-loss order placed for {sym} (Fractional or failed).")
+                            # Optional: Send alert for fractional share purchase without stop-loss
+                            send_alert(
+                                f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f} (No stop-loss due to fractional shares)",
+                                subject=f"Trade Executed: Bought {sym} (No Stop-Loss)"
+                            )
                         session.commit()
                         with open(csv_filename, mode='a', newline='') as csv_file:
                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
