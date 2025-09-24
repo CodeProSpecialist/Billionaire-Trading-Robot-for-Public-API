@@ -1158,8 +1158,8 @@ def rate_limited_get_quote(sym):
 
 @sleep_and_retry
 @limits(calls=YF_CALLS_PER_MINUTE, period=ONE_MINUTE)
-def rate_limited_yf_history(sym, period="20d"):
-    return yf.Ticker(sym.replace('.', '-')).history(period=period)
+def rate_limited_yf_history(sym, period="20d", interval="1d"):
+    return yf.Ticker(sym.replace('.', '-')).history(period=period, interval=interval)
 
 def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
     if task_running['buy_stocks']:
@@ -1204,7 +1204,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 print(f"No valid price data for {sym}. Skipping.")
                 logging.info(f"No valid price data for {sym}. Skipping")
                 continue
-            df = rate_limited_yf_history(sym)
+            df = rate_limited_yf_history(sym, period="20d", interval="1d")
             if df.empty or len(df) < 14:
                 print(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping.")
                 logging.info(f"Insufficient historical data for {sym} (daily rows: {len(df)}). Skipping")
@@ -1482,7 +1482,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             session.close()
     finally:
         task_running['buy_stocks'] = False
-
+        
 def sell_stocks(symbols_to_sell_dict):
     if task_running['sell_stocks']:
         print("sell_stocks already running. Skipping.")
