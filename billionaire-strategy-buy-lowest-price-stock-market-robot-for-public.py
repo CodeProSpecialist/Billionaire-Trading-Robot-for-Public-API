@@ -1233,15 +1233,15 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 logging.info(f"No valid price data for {sym}")
                 continue
             yf_symbol = sym.replace('.', '-')
-            df = rate_limited_yf_history(yf_symbol)
-            if df.empty or len(df) < 14:
-                print(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping.")
-                logging.info(f"Insufficient historical data for {sym} (rows: {len(df)}). Skipping")
+            df = rate_limited_yf_history(yf_symbol, period="1d", interval="5m")
+            if df.empty or len(df) < 3:
+                print(f"Insufficient 5-minute historical data for {sym} (rows: {len(df)}). Skipping.")
+                logging.info(f"Insufficient 5-minute historical data for {sym} (rows: {len(df)}). Skipping")
                 continue
             df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
-            if len(df) < 14:
-                print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
-                logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
+            if len(df) < 3:
+                print(f"After cleaning, insufficient 5-minute data for {yf_symbol} (rows: {len(df)}). Skipping.")
+                logging.info(f"After cleaning, insufficient 5-minute data for {yf_symbol} (rows: {len(df)}). Skipping")
                 continue
             score = 0
             close = df['Close'].values
@@ -1265,6 +1265,31 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 score += 1
                 print(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
                 logging.info(f"{yf_symbol}: Price decrease >= 0.3% from previous close: +1 score")
+            # Check for 0.3% price decrease within past 5 minutes from 10 minutes ago
+            try:
+                price_5min_ago = min_5_prices.get(sym)
+                price_10min_ago = close[-3] if len(close) >= 3 else None
+                # Print prices for verification
+                print(f"{yf_symbol}: Price 5 minutes ago: ${price_5min_ago:.2f}")
+                print(f"{yf_symbol}: Price 10 minutes ago: ${price_10min_ago:.2f}" if price_10min_ago else f"{yf_symbol}: Price 10 minutes ago: None")
+                logging.info(f"{yf_symbol}: Price 5 minutes ago: ${price_5min_ago:.2f}")
+                logging.info(f"{yf_symbol}: Price 10 minutes ago: ${price_10min_ago:.2f}" if price_10min_ago else f"{yf_symbol}: Price 10 minutes ago: None")
+                # Verify timestamp of price_10min_ago
+                if len(df) >= 3 and price_10min_ago:
+                    timestamp_10min_ago = df.index[-3]
+                    current_time = datetime.now(pytz.timezone('US/Eastern'))
+                    time_diff = (current_time - timestamp_10min_ago).total_seconds() / 60.0
+                    if 8 <= time_diff <= 12:  # Allow 8–12 minutes to account for data granularity
+                        if price_5min_ago and price_5min_ago <= price_10min_ago * 0.997:
+                            score += 1
+                            print(f"{yf_symbol}: Price decrease >= 0.3% from 10 minutes ago (${price_5min_ago:.2f} vs ${price_10min_ago:.2f}): +1 score")
+                            logging.info(f"{yf_symbol}: Price decrease >= 0.3% from 10 minutes ago (${price_5min_ago:.2f} vs ${price_10min_ago:.2f}): +1 score")
+                    else:
+                        print(f"{yf_symbol}: Warning: Price 10 minutes ago timestamp ({timestamp_10min_ago}) is {time_diff:.2f} minutes old, expected ~10 minutes.")
+                        logging.warning(f"{yf_symbol}: Price 10 minutes ago timestamp ({timestamp_10min_ago}) is {time_diff:.2f} minutes old, expected ~10 minutes.")
+            except Exception as e:
+                print(f"Error checking 5-min price decrease for {yf_symbol}: {e}")
+                logging.error(f"Error checking 5-min price decrease for {yf_symbol}: {e}")
             print(f"Checking for bullish reversal patterns in {sym}...")
             logging.info(f"Checking for bullish reversal patterns in {sym}")
             bullish_reversal_detected = False
@@ -1306,14 +1331,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                     print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     continue
-            if score >= 3:
+            if score >= 4:
                 buy_signals_count += 1
                 buy_signal_symbols.append(sym)
                 print(f"{yf_symbol}: Buy signal detected (Score: {score})")
                 logging.info(f"{yf_symbol}: Buy signal detected (Score: {score})")
             else:
-                print(f"{yf_symbol}: Score too low ({score} < 3). No buy signal.")
-                logging.info(f"{yf_symbol}: Score too low ({score} < 3). No buy signal")
+                print(f"{yf_symbol}: Score too low ({score} < 4). No buy signal.")
+                logging.info(f"{yf_symbol}: Score too low ({score} < 4). No buy signal")
         
         # Determine dollar allocation based on buying power
         remaining_symbols = buy_signal_symbols
