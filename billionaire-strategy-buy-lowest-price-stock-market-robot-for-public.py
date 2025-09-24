@@ -1337,8 +1337,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                 print(f"{yf_symbol}: Buy signal detected (Score: {score})")
                 logging.info(f"{yf_symbol}: Buy signal detected (Score: {score})")
             else:
-                print(f"{yf_symbol}: Score too low ({score} < 4). No buy signal.")
-                logging.info(f"{yf_symbol}: Score too low ({score} < 4). No buy signal")
+                print(f"{yf_symbol}: Score too low ({score} < 3). No buy signal.")
+                logging.info(f"{yf_symbol}: Score too low ({score} < 3). No buy signal")
         
         # Determine dollar allocation based on buying power
         remaining_symbols = buy_signal_symbols
