@@ -902,6 +902,10 @@ def remove_symbols_from_trade_list(symbol):
 @limits(calls=CALLS, period=PERIOD)
 def place_stop_loss_order(symbol, qty, avg_price, atr_multiplier=2.0):
     try:
+        if qty % 1 != 0:  # Check if quantity is fractional
+            logging.warning(f"Cannot place stop-loss order for {symbol}: Fractional shares ({qty:.4f}) are not supported for stop-loss orders.")
+            print(f"Cannot place stop-loss order for {symbol}: Fractional shares ({qty:.4f}) are not supported for stop-loss orders.")
+            return None, None
         atr = get_average_true_range(symbol)
         if atr is None:
             logging.error(f"No ATR for {symbol}. Skipping stop-loss.")
