@@ -1690,10 +1690,10 @@ def main():
             total_equity = acc['equity']
             buying_power = acc['buying_power_cash']
             print(f"\n{'='*60}")
-            print(f"Cycle completed. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            print(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
             print(f"{'='*60}\n")
-            logging.info(f"Cycle completed. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
-            time.sleep(300)
+            logging.info(f"Waiting 45 seconds. Total equity: ${total_equity:.2f}, Buying power: ${buying_power:.2f}")
+            time.sleep(45)
         except Exception as e:
             logging.error(f"Error in main loop: {e}")
             print(f"Error in main loop: {e}")
