@@ -1331,7 +1331,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                     print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
                     continue
-            if score >= 4:
+            if score >= 3:
                 buy_signals_count += 1
                 buy_signal_symbols.append(sym)
                 print(f"{yf_symbol}: Buy signal detected (Score: {score})")
