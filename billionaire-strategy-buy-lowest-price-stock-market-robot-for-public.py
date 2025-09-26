@@ -1525,9 +1525,9 @@ def sell_stocks(symbols_to_sell_dict):
                 print(f"Skipping sell for {sym}: Bought today.")
                 logging.info(f"Skipping sell for {sym}: Bought today.")
                 continue
-            if qty <= 0:
-                print(f"No quantity to sell for {sym}. Skipping.")
-                logging.info(f"No quantity to sell for {sym}. Skipping")
+            if qty <= 0.0001:
+                print(f"No significant quantity to sell for {sym} (qty: {qty:.6f}). Skipping.")
+                logging.info(f"No significant quantity to sell for {sym} (qty: {qty:.6f}). Skipping")
                 continue
             print(f"\n{'='*60}")
             print(f"Processing sell for {sym}...")
@@ -1549,7 +1549,7 @@ def sell_stocks(symbols_to_sell_dict):
                 continue
             df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
             if len(df) < 14:
-                print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
+                print(f"After cleaning, insignificant data for {yf_symbol} (rows: {len(df)}). Skipping.")
                 logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
                 continue
             sell_score = 0
@@ -1642,9 +1642,9 @@ def sell_stocks(symbols_to_sell_dict):
                 logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
                 continue
             sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
-            if sell_qty <= 0:
-                print(f"Calculated sell quantity for {sym} is zero. Skipping.")
-                logging.info(f"Calculated sell quantity for {sym} is zero. Skipping")
+            if sell_qty <= 0.0001:
+                print(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.6f}). Skipping.")
+                logging.info(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.6f}). Skipping")
                 continue
             if not ensure_no_open_orders(sym):
                 print(f"Cannot sell {sym}: Open orders exist.")
@@ -1679,7 +1679,7 @@ def sell_stocks(symbols_to_sell_dict):
                             position = session.query(Position).filter_by(symbols=sym).first()
                             if position:
                                 position.quantity -= filled_qty
-                                if position.quantity <= 0:
+                                if position.quantity <= 0.0001:
                                     if position.stop_order_id:
                                         client_cancel_order({'orderId': position.stop_order_id, 'instrument': {'symbol': sym}})
                                     session.delete(position)
