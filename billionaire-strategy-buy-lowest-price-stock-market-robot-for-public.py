@@ -160,6 +160,17 @@ def get_cached_data(symbols, data_type, fetch_func, *args, **kwargs):
     print(f"Cached {data_type} for {symbols}.")
     return data
 
+def cleanup_invalid_positions():
+    with SessionLocal() as session:
+        invalid_positions = session.query(Position).filter(Position.avg_price <= 0).all()
+        for pos in invalid_positions:
+            print(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.2f}")
+            logging.info(f"Deleting invalid position for {pos.symbols} with avg_price ${pos.avg_price:.2f}")
+            if pos.stop_order_id:
+                client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': pos.symbols}})
+            session.delete(pos)
+        session.commit()
+
 @sleep_and_retry
 @limits(calls=CALLS, period=PERIOD)
 def client_get_quote(symbol, retries=3):
