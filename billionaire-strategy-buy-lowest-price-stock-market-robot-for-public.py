@@ -1766,6 +1766,7 @@ def main():
                 time.sleep(60)
                 continue
             sync_db_with_api()
+            cleanup_invalid_positions()
             symbols_to_sell_dict = load_positions_from_database()
             if PRINT_ROBOT_STORED_BUY_AND_SELL_LIST_DATABASE:
                 print_database_tables()
