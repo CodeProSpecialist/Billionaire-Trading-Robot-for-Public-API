@@ -1657,22 +1657,53 @@ def sell_stocks(symbols_to_sell_dict):
                 print(f"Fresh quantity for {sym} is insignificant (qty: {fresh_qty:.10f}). Skipping sell.")
                 logging.info(f"Fresh quantity for {sym} is insignificant (qty: {fresh_qty:.10f}). Skipping sell")
                 continue
-            sell_qty = fresh_qty if FRACTIONAL_BUY_ORDERS else int(fresh_qty)
+            # Round sell quantity to 4 decimal places to match common broker precision
+            sell_qty = round(fresh_qty, 4) if FRACTIONAL_BUY_ORDERS else int(fresh_qty)
+            if sell_qty <= 0.0001:
+                print(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.10f}). Skipping sell.")
+                logging.info(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.10f}). Skipping sell")
+                continue
             if not ensure_no_open_orders(sym):
                 print(f"Cannot sell {sym}: Open orders exist.")
                 logging.info(f"Cannot sell {sym}: Open orders exist.")
                 continue
-            print(f"Preparing to sell {sell_qty:.10f} shares of {sym} at estimated ${current_price:.2f}")
-            logging.info(f"Preparing to sell {sell_qty:.10f} shares of {sym} at estimated ${current_price:.2f}")
-            order_id = client_place_order(
-                symbol=sym,
-                side="SELL",
-                amount=None,
-                quantity=sell_qty
-            )
+            print(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+            logging.info(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+            order_id = None
+            try:
+                order_id = client_place_order(
+                    symbol=sym,
+                    side="SELL",
+                    amount=None,
+                    quantity=sell_qty
+                )
+            except HTTPError as e:
+                if e.response.status_code == 400 and "exceeds the amount you have available to sell" in str(e):
+                    print(f"HTTP 400 error for {sym}: {str(e)}. Attempting to adjust quantity.")
+                    logging.warning(f"HTTP 400 error for {sym}: {str(e)}. Attempting to adjust quantity.")
+                    # Try with slightly reduced quantity (e.g., rounded to 6 decimal places or lower)
+                    adjusted_qty = round(fresh_qty, 6)
+                    if adjusted_qty > 0.0000000001:
+                        print(f"Retrying sell for {sym} with adjusted quantity: {adjusted_qty:.6f}")
+                        logging.info(f"Retrying sell for {sym} with adjusted quantity: {adjusted_qty:.6f}")
+                        try:
+                            order_id = client_place_order(
+                                symbol=sym,
+                                side="SELL",
+                                amount=None,
+                                quantity=adjusted_qty
+                            )
+                        except HTTPError as retry_e:
+                            print(f"Retry failed for {sym}: {str(retry_e)}. Skipping sell.")
+                            logging.error(f"Retry failed for {sym}: {str(retry_e)}. Skipping sell")
+                            continue
+                    else:
+                        print(f"Adjusted quantity for {sym} is insignificant (qty: {adjusted_qty:.10f}). Skipping sell.")
+                        logging.info(f"Adjusted quantity for {sym} is insignificant (qty: {adjusted_qty:.10f}). Skipping sell")
+                        continue
             if order_id:
-                print(f"Sell order placed for {sell_qty:.10f} shares of {sym} | Order ID: {order_id}")
-                logging.info(f"Sell order placed for {sell_qty:.10f} shares of {sym} | Order ID: {order_id}")
+                print(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
+                logging.info(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
                 status_info = client_get_order_status(order_id)
                 if status_info and status_info["status"] == "FILLED":
                     filled_qty = status_info["filled_qty"]
@@ -1707,10 +1738,10 @@ def sell_stocks(symbols_to_sell_dict):
                                         'Symbol': sym,
                                         'Price Per Share': filled_price
                                     })
-                                print(f"Sell order filled for {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}")
-                                logging.info(f"Sell order filled for {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}")
+                                print(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
+                                logging.info(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
                                 send_alert(
-                                    f"Sold {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}",
+                                    f"Sold {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}",
                                     subject=f"Sell Order Filled: {sym}"
                                 )
                             except Exception as e:
