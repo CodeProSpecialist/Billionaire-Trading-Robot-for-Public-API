@@ -1501,13 +1501,14 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
             session.close()
     finally:
         task_running['buy_stocks'] = False
-        
+
 def sell_stocks():
     if task_running['sell_stocks']:
         print("sell_stocks already running. Skipping.")
         logging.info("sell_stocks already running. Skipping")
         return
     task_running['sell_stocks'] = True
+    symbols_to_remove = []  # Initialize symbols_to_remove
     try:
         print("\nStarting sell_stocks function...")
         logging.info("Starting sell_stocks function")
@@ -1642,6 +1643,7 @@ def sell_stocks():
                                         if pos.stop_order_id:
                                             client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                         session.delete(pos)
+                                        symbols_to_remove.append(sym)  # Add symbol to remove list
                                     session.commit()
                                     with open(csv_filename, mode='a', newline='') as csv_file:
                                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1696,6 +1698,7 @@ def sell_stocks():
                                             if pos.stop_order_id:
                                                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                             session.delete(pos)
+                                            symbols_to_remove.append(sym)  # Add symbol to remove list
                                         session.commit()
                                         with open(csv_filename, mode='a', newline='') as csv_file:
                                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1717,7 +1720,6 @@ def sell_stocks():
                             if attempt == 2:
                                 print(f"All retries failed for {sym}.")
                                 logging.error(f"All retries failed for {sym}")
-                    symbols_to_remove.append(sym)
         except Exception as e:
             session.rollback()
             logging.error(f"Error in sell_stocks: {e}")
@@ -1729,7 +1731,7 @@ def sell_stocks():
             remove_symbols_from_trade_list(sym)
     finally:
         task_running['sell_stocks'] = False
-        
+     
 def main():
     initialize_csv()
     print(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
