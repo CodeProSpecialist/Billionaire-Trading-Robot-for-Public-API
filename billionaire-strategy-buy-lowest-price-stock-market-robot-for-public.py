@@ -212,7 +212,8 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
         "instrument": {"symbol": symbol, "type": "EQUITY"},
         "orderSide": side.upper(),
         "orderType": "MARKET",
-        "expiration": expiration
+        "expiration": expiration,
+        "openCloseIndicator": "OPEN"
     }
     if amount is not None:
         payload["amount"] = f"{amount:.2f}"
@@ -221,7 +222,7 @@ def place_market_order(symbol, side, fractional=False, amount=None, quantity=Non
             quantity = int(quantity)
             payload["quantity"] = str(quantity)
         else:
-            payload["quantity"] = f"{quantity:.4f}"
+            payload["quantity"] = f"{quantity:.5f}"
     else:
         raise ValueError("Must provide 'amount' for fractional orders or 'quantity' for full-share orders")
     try:
