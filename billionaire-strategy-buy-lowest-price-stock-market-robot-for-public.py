@@ -1525,9 +1525,9 @@ def sell_stocks(symbols_to_sell_dict):
                 print(f"Skipping sell for {sym}: Bought today.")
                 logging.info(f"Skipping sell for {sym}: Bought today.")
                 continue
-            if qty <= 0.0001:
-                print(f"No significant quantity to sell for {sym} (qty: {qty:.6f}). Skipping.")
-                logging.info(f"No significant quantity to sell for {sym} (qty: {qty:.6f}). Skipping")
+            if qty <= 0.0000000001:
+                print(f"No significant quantity to sell for {sym} (qty: {qty:.10f}). Skipping.")
+                logging.info(f"No significant quantity to sell for {sym} (qty: {qty:.10f}). Skipping")
                 continue
             print(f"\n{'='*60}")
             print(f"Processing sell for {sym}...")
@@ -1549,7 +1549,7 @@ def sell_stocks(symbols_to_sell_dict):
                 continue
             df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
             if len(df) < 14:
-                print(f"After cleaning, insignificant data for {yf_symbol} (rows: {len(df)}). Skipping.")
+                print(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping.")
                 logging.info(f"After cleaning, insufficient data for {yf_symbol} (rows: {len(df)}). Skipping")
                 continue
             sell_score = 0
@@ -1641,17 +1641,29 @@ def sell_stocks(symbols_to_sell_dict):
                 print(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell.")
                 logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
                 continue
-            sell_qty = qty if FRACTIONAL_BUY_ORDERS else int(qty)
-            if sell_qty <= 0.0001:
-                print(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.6f}). Skipping.")
-                logging.info(f"Calculated sell quantity for {sym} is insignificant (qty: {sell_qty:.6f}). Skipping")
+            # Refresh quantity from Public.com API before placing sell order
+            print(f"Refreshing quantity from Public.com API for {sym} before selling...")
+            logging.info(f"Refreshing quantity from Public.com API for {sym} before selling")
+            fresh_positions = client_list_positions()
+            fresh_pos = next((p for p in fresh_positions if p['symbol'] == sym), None)
+            if not fresh_pos:
+                print(f"No position found for {sym} after refresh. Skipping sell.")
+                logging.info(f"No position found for {sym} after refresh. Skipping sell")
                 continue
+            fresh_qty = fresh_pos['qty']
+            print(f"Fresh quantity for {sym}: {fresh_qty:.10f}")
+            logging.info(f"Fresh quantity for {sym}: {fresh_qty:.10f}")
+            if fresh_qty <= 0.0000000001:
+                print(f"Fresh quantity for {sym} is insignificant (qty: {fresh_qty:.10f}). Skipping sell.")
+                logging.info(f"Fresh quantity for {sym} is insignificant (qty: {fresh_qty:.10f}). Skipping sell")
+                continue
+            sell_qty = fresh_qty if FRACTIONAL_BUY_ORDERS else int(fresh_qty)
             if not ensure_no_open_orders(sym):
                 print(f"Cannot sell {sym}: Open orders exist.")
                 logging.info(f"Cannot sell {sym}: Open orders exist.")
                 continue
-            print(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
-            logging.info(f"Preparing to sell {sell_qty:.4f} shares of {sym} at estimated ${current_price:.2f}")
+            print(f"Preparing to sell {sell_qty:.10f} shares of {sym} at estimated ${current_price:.2f}")
+            logging.info(f"Preparing to sell {sell_qty:.10f} shares of {sym} at estimated ${current_price:.2f}")
             order_id = client_place_order(
                 symbol=sym,
                 side="SELL",
@@ -1659,8 +1671,8 @@ def sell_stocks(symbols_to_sell_dict):
                 quantity=sell_qty
             )
             if order_id:
-                print(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
-                logging.info(f"Sell order placed for {sell_qty:.4f} shares of {sym} | Order ID: {order_id}")
+                print(f"Sell order placed for {sell_qty:.10f} shares of {sym} | Order ID: {order_id}")
+                logging.info(f"Sell order placed for {sell_qty:.10f} shares of {sym} | Order ID: {order_id}")
                 status_info = client_get_order_status(order_id)
                 if status_info and status_info["status"] == "FILLED":
                     filled_qty = status_info["filled_qty"]
@@ -1679,7 +1691,7 @@ def sell_stocks(symbols_to_sell_dict):
                             position = session.query(Position).filter_by(symbols=sym).first()
                             if position:
                                 position.quantity -= filled_qty
-                                if position.quantity <= 0.0001:
+                                if position.quantity <= 0.0000000001:
                                     if position.stop_order_id:
                                         client_cancel_order({'orderId': position.stop_order_id, 'instrument': {'symbol': sym}})
                                     session.delete(position)
@@ -1695,10 +1707,10 @@ def sell_stocks(symbols_to_sell_dict):
                                         'Symbol': sym,
                                         'Price Per Share': filled_price
                                     })
-                                print(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
-                                logging.info(f"Sell order filled for {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}")
+                                print(f"Sell order filled for {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}")
+                                logging.info(f"Sell order filled for {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}")
                                 send_alert(
-                                    f"Sold {filled_qty:.4f} shares of {sym} at ${filled_price:.2f}",
+                                    f"Sold {filled_qty:.10f} shares of {sym} at ${filled_price:.2f}",
                                     subject=f"Sell Order Filled: {sym}"
                                 )
                             except Exception as e:
