@@ -1044,6 +1044,12 @@ def check_price_moves():
             for pos in positions:
                 current_price = client_get_quote(pos.symbols)
                 if current_price is None:
+                    print(f"No valid price data for {pos.symbols}. Skipping.")
+                    logging.info(f"No valid price data for {pos.symbols}. Skipping")
+                    continue
+                if pos.avg_price <= 0:  # Updated: Handle zero or negative (invalid) avg_price
+                    print(f"Warning: Invalid average price (${pos.avg_price:.2f}) for {pos.symbols}. Skipping percentage change calculation.")
+                    logging.warning(f"Invalid average price (${pos.avg_price:.2f}) for {pos.symbols}. Skipping percentage change calculation.")
                     continue
                 pct_change = (current_price - pos.avg_price) / pos.avg_price * 100
                 if abs(pct_change) >= 5:
