@@ -1520,6 +1520,11 @@ def sell_stocks(symbols_to_sell_dict):
             sym = pos['symbol']
             qty = pos['qty']
             avg_price = pos['avg_entry_price']
+            purchase_date = pos['purchase_date']
+            if purchase_date == today_date_str:
+                print(f"Skipping sell for {sym}: Bought today.")
+                logging.info(f"Skipping sell for {sym}: Bought today.")
+                continue
             if qty <= 0:
                 print(f"No quantity to sell for {sym}. Skipping.")
                 logging.info(f"No quantity to sell for {sym}. Skipping")
@@ -1549,6 +1554,9 @@ def sell_stocks(symbols_to_sell_dict):
                 continue
             sell_score = 0
             close = df['Close'].values
+            open_ = df['Open'].values
+            high = df['High'].values
+            low = df['Low'].values
             try:
                 rsi = talib.RSI(close, timeperiod=14)
                 latest_rsi = rsi[-1] if len(rsi) > 0 and not np.isnan(rsi[-1]) else 50.00
@@ -1587,6 +1595,48 @@ def sell_stocks(symbols_to_sell_dict):
                 sell_score += 1
                 print(f"{yf_symbol}: Loss <= -2.0% ({profit_percentage:.2f}%): +1 sell score")
                 logging.info(f"{yf_symbol}: Loss <= -2.0% ({profit_percentage:.2f}%): +1 sell score")
+            print(f"Checking for bearish reversal patterns in {sym}...")
+            logging.info(f"Checking for bearish reversal patterns in {sym}")
+            bearish_reversal_detected = False
+            detected_patterns = []
+            patterns = {
+                'Bearish Engulfing': talib.CDLENGULFING,
+                'Evening Star': talib.CDLEVENINGSTAR,
+                'Shooting Star': talib.CDLSHOOTINGSTAR,
+                'Hanging Man': talib.CDLHANGINGMAN,
+                'Dark Pool Cover': talib.CDLDARKCLOUDCOVER,
+                'Doji Star': talib.CDLDOJISTAR,
+                'Harami Cross': talib.CDLHARAMICROSS,
+                'Tweezer Top': talib.CDLMATCHINGLOW
+            }
+            valid_mask = ~np.isnan(open_) & ~np.isnan(high) & ~np.isnan(low) & ~np.isnan(close)
+            if valid_mask.sum() < 2:
+                print(f"Insufficient valid data for {sym} after removing NaN values. Skipping candlestick analysis.")
+                logging.info(f"Insufficient valid data for {sym} after removing NaN values.")
+            else:
+                open_valid = np.array(open_[valid_mask], dtype=np.float64)
+                high_valid = np.array(high[valid_mask], dtype=np.float64)
+                low_valid = np.array(low[valid_mask], dtype=np.float64)
+                close_valid = np.array(close[valid_mask], dtype=np.float64)
+                lookback_candles = min(20, len(close_valid))
+                for i in range(-1, -lookback_candles, -1):
+                    if abs(i) > len(open_valid):
+                        continue
+                    try:
+                        for name, func in patterns.items():
+                            res = func(open_valid[:i + 1], high_valid[:i + 1], low_valid[:i + 1], close_valid[:i + 1])
+                            if res[-1] < 0:  # Bearish patterns return negative values in TA-Lib
+                                detected_patterns.append(name)
+                                bearish_reversal_detected = True
+                        if bearish_reversal_detected:
+                            sell_score += 1
+                            print(f"{yf_symbol}: Detected bearish reversal patterns: {', '.join(detected_patterns)} (+1 sell score)")
+                            logging.info(f"{yf_symbol}: Detected bearish reversal patterns: {', '.join(detected_patterns)}")
+                            break
+                    except Exception as e:
+                        print(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                        logging.error(f"Error in candlestick pattern detection for {yf_symbol}: {e}")
+                        continue
             if sell_score < 3:
                 print(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell.")
                 logging.info(f"{yf_symbol}: Sell score too low ({sell_score} < 3). Skipping sell")
@@ -1677,7 +1727,7 @@ def sell_stocks(symbols_to_sell_dict):
         traceback.print_exc()
     finally:
         task_running['sell_stocks'] = False
-
+        
 def main():
     initialize_csv()
     print(f"Starting trading bot at {datetime.now(eastern).strftime('%Y-%m-%d %H:%M:%S %Z')}...")
