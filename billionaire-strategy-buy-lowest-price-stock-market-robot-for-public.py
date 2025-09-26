@@ -256,6 +256,10 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 quantity=quantity
             )
         else:  # STOP
+            if quantity % 1 != 0:
+                logging.error(f"Cannot place stop order for {symbol}: Fractional quantities ({quantity:.5f}) are not supported.")
+                print(f"Cannot place stop order for {symbol}: Fractional quantities ({quantity:.5f}) are not supported.")
+                return None
             url = f"{BASE_URL}/trading/{account_id}/order"
             order_id = str(uuid4())
             payload = {
@@ -264,8 +268,9 @@ def client_place_order(symbol, side, amount=None, quantity=None, order_type="MAR
                 "orderSide": side.upper(),
                 "orderType": "STOP",
                 "stopPrice": stop_price,
-                "quantity": f"{quantity:.4f}" if quantity % 1 != 0 else str(int(quantity)),
-                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()}
+                "quantity": str(int(quantity)),
+                "expiration": {"timeInForce": "GTD", "expirationTime": get_expiration()},
+                "openCloseIndicator": "OPEN"
             }
             response = requests.post(url, headers=HEADERS, json=payload, timeout=10)
             if response.status_code >= 400:
