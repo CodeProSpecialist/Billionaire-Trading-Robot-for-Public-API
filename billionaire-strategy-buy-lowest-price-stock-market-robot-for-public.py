@@ -1755,7 +1755,7 @@ def main():
                 print(f"Symbols to buy: {symbols_to_buy_list}")
                 logging.info(f"Symbols to buy: {symbols_to_buy_list}")
             buy_stocks(symbols_to_sell_dict, symbols_to_buy_list)
-            sell_stocks(symbols_to_sell_dict)
+            sell_stocks()
             check_price_moves()
             check_stop_order_status()
             monitor_stop_losses()
