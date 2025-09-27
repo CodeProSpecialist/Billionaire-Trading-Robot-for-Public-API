@@ -1484,8 +1484,8 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                             csv_writer.writerow({
                                 'Date': today_date_str,
-                                'Buy': filled_qty,
-                                'Sell': 0,
+                                'Buy': 'Buy',
+                                'Sell': ' ',
                                 'Quantity': filled_qty,
                                 'Symbol': sym,
                                 'Price Per Share': avg_price
@@ -1666,8 +1666,8 @@ def sell_stocks():
                                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                         csv_writer.writerow({
                                             'Date': datetime.now(eastern).strftime("%Y-%m-%d"),
-                                            'Buy': 0,
-                                            'Sell': filled_qty,
+                                            'Buy': ' ',
+                                            'Sell': 'Sell',
                                             'Quantity': filled_qty,
                                             'Symbol': sym,
                                             'Price Per Share': filled_price
