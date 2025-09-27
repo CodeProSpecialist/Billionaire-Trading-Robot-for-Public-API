@@ -1025,8 +1025,8 @@ def check_stop_order_status():
                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                         csv_writer.writerow({
                             'Date': today_date_str,
-                            'Buy': 0,
-                            'Sell': filled_qty,
+                            'Buy': ' ',
+                            'Sell': 'Sell',
                             'Quantity': filled_qty,
                             'Symbol': pos.symbols,
                             'Price Per Share': filled_price
