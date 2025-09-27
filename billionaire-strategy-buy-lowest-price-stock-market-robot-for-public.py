@@ -1525,7 +1525,7 @@ def sell_stocks():
         logging.info("sell_stocks already running. Skipping")
         return
     task_running['sell_stocks'] = True
-    symbols_to_remove = []  # Initialize symbols_to_remove
+    symbols_to_remove = []
     try:
         print("\nStarting sell_stocks function...")
         logging.info("Starting sell_stocks function")
@@ -1538,6 +1538,11 @@ def sell_stocks():
                 return
             for pos in positions:
                 sym = pos.symbols
+                purchase_date = datetime.strptime(pos.purchase_date, "%Y-%m-%d").date()
+                if purchase_date == today_date:
+                    print(f"Skipping sell for {sym}: Purchased today ({purchase_date}).")
+                    logging.info(f"Skipping sell for {sym}: Purchased today ({purchase_date})")
+                    continue
                 print(f"\n{'='*60}")
                 print(f"Evaluating {sym} for sell signal...")
                 print(f"{'='*60}")
@@ -1585,7 +1590,6 @@ def sell_stocks():
                     score += 1
                     print(f"{yf_symbol}: Price increase >= 0.3% from 10 minutes ago: +1 score")
                     logging.info(f"{yf_symbol}: Price increase >= 0.3% from 10 minutes ago: +1 score")
-                # Check for bearish candlestick patterns
                 print(f"Checking for bearish reversal patterns in {sym}...")
                 logging.info(f"Checking for bearish reversal patterns in {sym}")
                 bearish_patterns = {
@@ -1600,7 +1604,7 @@ def sell_stocks():
                 for pattern_name, pattern_func in bearish_patterns.items():
                     try:
                         pattern_values = pattern_func(open_, high, low, close)
-                        if pattern_values[-1] < 0:  # Bearish patterns return negative values
+                        if pattern_values[-1] < 0:
                             detected_patterns.append(pattern_name)
                             bearish_detected = True
                     except Exception as e:
@@ -1613,7 +1617,6 @@ def sell_stocks():
                 print(f"{yf_symbol} sell score: {score}")
                 logging.info(f"{yf_symbol} sell score: {score}")
                 fresh_qty = pos.quantity
-                # Check for minimum 0.1% profit
                 profit_pct = ((current_price - pos.avg_price) / pos.avg_price * 100) if pos.avg_price > 0 else 0
                 profit_color = GREEN if profit_pct >= 0 else RED
                 print(f"{yf_symbol}: Current price: {profit_color}${current_price:.2f}{RESET}, Avg price: ${pos.avg_price:.2f}, Profit: {profit_color}{profit_pct:.2f}%{RESET}")
@@ -1660,7 +1663,7 @@ def sell_stocks():
                                         if pos.stop_order_id:
                                             client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                         session.delete(pos)
-                                        symbols_to_remove.append(sym)  # Add symbol to remove list
+                                        symbols_to_remove.append(sym)
                                     session.commit()
                                     with open(csv_filename, mode='a', newline='') as csv_file:
                                         csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -1715,7 +1718,7 @@ def sell_stocks():
                                             if pos.stop_order_id:
                                                 client_cancel_order({'orderId': pos.stop_order_id, 'instrument': {'symbol': sym}})
                                             session.delete(pos)
-                                            symbols_to_remove.append(sym)  # Add symbol to remove list
+                                            symbols_to_remove.append(sym)
                                         session.commit()
                                         with open(csv_filename, mode='a', newline='') as csv_file:
                                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
