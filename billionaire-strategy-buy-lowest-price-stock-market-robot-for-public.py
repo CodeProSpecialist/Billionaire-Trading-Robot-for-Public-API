@@ -1492,7 +1492,7 @@ def buy_stocks(symbols_to_sell_dict, symbols_to_buy_list):
                             })
                         send_alert(
                             f"Bought {filled_qty:.4f} shares of {sym} at ${avg_price:.2f}",
-                            subject=f"Trade Executed: Bought {sym}"
+                            subject=f"Trade Order: Bought {sym}"
                         )
                         symbols_to_remove.append(sym)
                         acc = client_get_account()
@@ -1674,10 +1674,10 @@ def sell_stocks():
                                         })
                                     send_alert(
                                         f"Sold {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}",
-                                        subject=f"Sell Executed: {sym}"
+                                        subject=f"Sell Order: {sym}"
                                     )
-                                    print(f"Sell executed for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
-                                    logging.info(f"Sell executed for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
+                                    print(f"Sell Order for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
+                                    logging.info(f"Sell Order for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
                                     break
                             else:
                                 print(f"Sell order failed for {sym}.")
@@ -1721,18 +1721,18 @@ def sell_stocks():
                                             csv_writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
                                             csv_writer.writerow({
                                                 'Date': datetime.now(eastern).strftime("%Y-%m-%d"),
-                                                'Buy': 0,
-                                                'Sell': filled_qty,
+                                                'Buy': ' ',
+                                                'Sell': 'Sell',
                                                 'Quantity': filled_qty,
                                                 'Symbol': sym,
                                                 'Price Per Share': filled_price
                                             })
                                         send_alert(
                                             f"Sold {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}",
-                                            subject=f"Sell Executed: {sym}"
+                                            subject=f"Sell Order: {sym}"
                                         )
-                                        print(f"Retry sell executed for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
-                                        logging.info(f"Retry sell executed for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
+                                        print(f"Retry sell Order for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
+                                        logging.info(f"Retry sell Order for {filled_qty:.5f} shares of {sym} at ${filled_price:.2f}")
                                         break
                             if attempt == 2:
                                 print(f"All retries failed for {sym}.")
