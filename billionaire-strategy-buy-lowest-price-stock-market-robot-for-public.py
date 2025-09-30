@@ -1762,7 +1762,7 @@ def main():
         return
     while True:
         try:
-            stop_if_stock_market_is_closed()
+            # stop_if_stock_market_is_closed()
             if not refresh_token_if_needed():
                 print("Failed to refresh token. Retrying in 60 seconds.")
                 logging.error("Failed to refresh token. Retrying in 60 seconds")
